@@ -1,0 +1,6 @@
+{
+  "name": "api-jws-ersa",
+  "version": "1.0.0",
+  "description": "RSS Aggregator untuk ESP32 Masjid Display",
+  "private": true
+}

@@ -1,0 +1,9 @@
+{
+  "version": 2,
+  "routes": [
+    {
+      "src": "/rss.xml",
+      "dest": "/api/rss.xml"
+    }
+  ]
+}
