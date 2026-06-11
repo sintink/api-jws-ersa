@@ -1,25 +1,25 @@
 // api/rss_xml.js
 // Vercel Serverless Function — RSS + JSON Aggregator untuk ESP32 Display
-// Endpoint: GET /rss.xml?berita=1&gempa=1&bola=1&fakta=1&libur=1
+// Endpoint: GET /rss.xml?berita=1&gempa=1&bola=1&olahraga=1&libur=1
 //
 // Query params (default semua aktif, nonaktifkan dengan =0):
 //   berita=0   → matikan berita
 //   gempa=0    → matikan gempa
 //   bola=0     → matikan jadwal bola
-//   fakta=0    → matikan fakta unik
+//   olahraga=0 → matikan berita olahraga
 //   libur=0    → matikan countdown hari libur
 
 // ── Sumber RSS Berita ─────────────────────────────────────────────────────────
 const RSS_SOURCES = [
     { name: 'Antara',   url: 'https://www.antaranews.com/rss/terkini.xml' },
     { name: 'CNN',      url: 'https://www.cnnindonesia.com/rss' },
-    { name: 'Detik',    url: 'https://rss.detik.com/index.php/detikcom' },
-    { name: 'MediaID',  url: 'https://mediaindonesia.com/feed/rss' },
+    { name: 'Detik',    url: 'https://finance.detik.com/rss' },
+    { name: 'Tirto',  url: 'https://tirto.id/sitemap/r/google-discover' },
 ];
 
 // ── Sumber JSON ───────────────────────────────────────────────────────────────
 const BMKG_GEMPA   = 'https://data.bmkg.go.id/DataMKG/TEWS/autogempa.json';
-const FAKTA_URL    = 'https://uselessfacts.jsph.pl/api/v2/facts/random?language=id';
+const RSS_OLAHRAGA = { name: 'Olahraga', url: 'https://www.cnnindonesia.com/olahraga/rss' };
 const LIBUR_URL = 'https://raw.githubusercontent.com/guangrei/APIHariLibur_V2/main/holidays.json';
 
 // TheSportsDB — liga yang ditampilkan
@@ -123,22 +123,6 @@ async function getGempa() {
     }
 }
 
-// ── Ambil fakta unik Bahasa Indonesia ────────────────────────────────────────
-async function getFakta() {
-    try {
-        const res  = await fetchWithTimeout(FAKTA_URL);
-        const json = await res.json();
-        const teks = json?.text || '';
-        if (teks.length > 5) {
-            const trimmed = teks.length > 180 ? teks.substring(0, 177) + '...' : teks;
-            return [`Fakta: ${trimmed}`];
-        }
-        return [];
-    } catch (e) {
-        console.error('getFakta error:', e.message);
-        return [];
-    }
-}
 
 // ── Countdown hari libur nasional Indonesia ───────────────
 async function getLibur() {
@@ -220,14 +204,13 @@ function getLabelWaktu(dateStr, timeStr) {
         return timeStr || '';
     }
 }
-
 // ── Ambil jadwal bola dari TheSportsDB ───────────────────────────────────────
 async function getBola() {
-    // Hanya tampil sore (15:00) sampai dini hari (03:00 WIB)
-    const nowWIB = new Date(Date.now() + 7 * 60 * 60 * 1000);
-    const jamWIB = nowWIB.getUTCHours();
-    const aktif  = (jamWIB >= 15) || (jamWIB < 3);
-    if (!aktif) return [];
+    const wibOffset = 7 * 60 * 60 * 1000;
+    const nowWIB    = new Date(Date.now() + wibOffset);
+
+    // Tanggal hari ini dalam format YYYY-MM-DD (WIB)
+    const todayStr = nowWIB.toISOString().substring(0, 10);
 
     const hasil = [];
 
@@ -238,22 +221,27 @@ async function getBola() {
             const json = await res.json();
             const events = json?.events || [];
 
-            // Ambil MAX_MATCH_PER_LIGA pertandingan terdekat
-            const taken = events.slice(0, MAX_MATCH_PER_LIGA);
-            for (const ev of taken) {
-                const home   = ev.strHomeTeam || '?';
-                const away   = ev.strAwayTeam || '?';
-                const tgl    = ev.dateEvent   || '';
-                const time   = ev.strTime     || '00:00:00';
-                const label  = getLabelWaktu(tgl, time);
-                hasil.push(`[${liga.nama}] ${label} | ${home} vs ${away}`);
+            for (const ev of events) {
+                const tgl  = ev.dateEvent || '';
+                if (tgl !== todayStr) continue;  // hanya hari ini
+
+                const home = ev.strHomeTeam || '?';
+                const away = ev.strAwayTeam || '?';
+                const time = ev.strTime     || '00:00:00';
+
+                // Konversi jam UTC → WIB
+                const utcDate = new Date(`${tgl}T${time}Z`);
+                const wibDate = new Date(utcDate.getTime() + wibOffset);
+                const jam = String(wibDate.getUTCHours()).padStart(2, '0');
+                const mnt = String(wibDate.getUTCMinutes()).padStart(2, '0');
+
+                hasil.push(`[${liga.nama}] ${jam}:${mnt} | ${home} vs ${away}`);
             }
         } catch (e) {
             console.error(`getBola ${liga.nama} error:`, e.message);
         }
     }));
 
-    // Urutkan by waktu terdekat (sudah ada label tapi sort by raw time)
     return hasil;
 }
 
@@ -281,27 +269,27 @@ export default async function handler(req, res) {
     res.setHeader('Cache-Control', 's-maxage=300, stale-while-revalidate');
 
     const q = req.query || {};
-    const wantBerita = q.berita !== '0';
-    const wantGempa  = q.gempa  !== '0';
-    const wantBola   = q.bola   !== '0';
-    const wantFakta  = q.fakta  !== '0';
-    const wantLibur  = q.libur  !== '0';
+    const wantBerita   = q.berita   !== '0';
+    const wantGempa    = q.gempa    !== '0';
+    const wantBola     = q.bola     !== '0';
+    const wantOlahraga = q.olahraga !== '0';
+    const wantLibur    = q.libur    !== '0';
 
     // Jalankan semua fetch paralel
-    const [beritaItems, gempaItems, bolaItems, faktaItems, liburItems] = await Promise.all([
-        wantBerita ? getBerita(3)  : [],
-        wantGempa  ? getGempa()    : [],
-        wantBola   ? getBola()     : [],
-        wantFakta  ? getFakta()    : [],
-        wantLibur  ? getLibur()    : [],
+    const [beritaItems, gempaItems, bolaItems, olahragaItems, liburItems] = await Promise.all([
+        wantBerita   ? getBerita(3)                  : [],
+        wantGempa    ? getGempa()                    : [],
+        wantBola     ? getBola()                     : [],
+        wantOlahraga ? fetchOneRSS(RSS_OLAHRAGA, 3)  : [],
+        wantLibur    ? getLibur()                    : [],
     ]);
 
     const allItems = [
-        ...liburItems,   // countdown libur paling atas
-        ...gempaItems,   // gempa prioritas kedua
-        ...bolaItems,    // jadwal bola
-        ...beritaItems,  // berita
-        ...faktaItems,   // fakta unik paling bawah
+        ...liburItems,    // countdown libur paling atas
+        ...gempaItems,    // gempa prioritas kedua
+        ...bolaItems,     // jadwal bola
+        ...olahragaItems, // berita olahraga
+        ...beritaItems,   // berita umum
     ];
 
     if (allItems.length === 0) {
@@ -312,4 +300,4 @@ export default async function handler(req, res) {
     res.setHeader('Content-Type', 'application/xml; charset=utf-8');
     res.status(200).send(xml);
             }
-                               
+        
