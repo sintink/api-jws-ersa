@@ -1,11 +1,37 @@
-// api/rss.xml.js
-// Vercel Serverless Function — RSS Aggregator untuk ESP32 Masjid Display
-// Endpoint: GET /rss.xml?berita=1&gempa=1&hadits=1
-// Kompatibel dengan News.cpp parser (format <item><title>...</title></item>)
+// api/rss_xml.js
+// Vercel Serverless Function — RSS + JSON Aggregator untuk ESP32 Display
+// Endpoint: GET /rss.xml?berita=1&gempa=1&bola=1&fakta=1&libur=1
+//
+// Query params (default semua aktif, nonaktifkan dengan =0):
+//   berita=0   → matikan berita
+//   gempa=0    → matikan gempa
+//   bola=0     → matikan jadwal bola
+//   fakta=0    → matikan fakta unik
+//   libur=0    → matikan countdown hari libur
 
-const ANTARA_RSS = 'https://www.antaranews.com/rss/terkini.xml';
-const BMKG_GEMPA = 'https://data.bmkg.go.id/DataMKG/TEWS/autogempa.json';
-const HADITH_API = 'https://api.hadith.gading.dev/books/muslim/1';
+// ── Sumber RSS Berita ─────────────────────────────────────────────────────────
+const RSS_SOURCES = [
+    { name: 'Antara',   url: 'https://www.antaranews.com/rss/terkini.xml' },
+    { name: 'CNN',      url: 'https://www.cnnindonesia.com/rss' },
+    { name: 'Detik',    url: 'https://rss.detik.com/index.php/detikcom' },
+    { name: 'MediaID',  url: 'https://mediaindonesia.com/feed/rss' },
+];
+
+// ── Sumber JSON ───────────────────────────────────────────────────────────────
+const BMKG_GEMPA   = 'https://data.bmkg.go.id/DataMKG/TEWS/autogempa.json';
+const FAKTA_URL    = 'https://uselessfacts.jsph.pl/api/v2/facts/random?language=id';
+const LIBUR_URL = 'https://raw.githubusercontent.com/guangrei/APIHariLibur_V2/main/holidays.json';
+
+// TheSportsDB — liga yang ditampilkan
+// id: league ID di TheSportsDB
+const LIGA_LIST = [
+    { nama: 'EPL',       id: 4328 },  // English Premier League
+    { nama: 'La Liga',   id: 4335 },  // Spanish La Liga
+    { nama: 'Serie A',   id: 4332 },  // Italian Serie A
+    { nama: 'Bundesliga',id: 4331 },  // German Bundesliga
+    { nama: 'Liga 1',    id: 4650 },  // Liga 1 Indonesia
+];
+const MAX_MATCH_PER_LIGA = 3;
 
 // ── Fetch dengan timeout ──────────────────────────────────────────────────────
 async function fetchWithTimeout(url, ms = 8000) {
@@ -32,13 +58,12 @@ function escXml(str) {
         .replace(/'/g, '&apos;');
 }
 
-// ── Ambil berita dari Antara RSS ──────────────────────────────────────────────
-async function getBerita(quota = 4) {
+// ── Ambil berita dari satu RSS source ────────────────────────────────────────
+async function fetchOneRSS(source, quota = 3) {
     try {
-        const res = await fetchWithTimeout(ANTARA_RSS);
+        const res = await fetchWithTimeout(source.url);
         const xml = await res.text();
         const items = [];
-        // Parse <title> di dalam <item> secara manual (tidak ada DOM di serverless)
         const itemRegex = /<item>[\s\S]*?<\/item>/g;
         const titleRegex = /<title><!\[CDATA\[([\s\S]*?)\]\]><\/title>|<title>([\s\S]*?)<\/title>/;
         let match;
@@ -48,15 +73,31 @@ async function getBerita(quota = 4) {
             if (titleMatch) {
                 const title = (titleMatch[1] || titleMatch[2] || '').trim();
                 if (title.length > 3) {
-                    items.push(title);
+                    items.push(`[${source.name}] ${title}`);
                 }
             }
         }
         return items;
     } catch (e) {
-        console.error('getBerita error:', e.message);
+        console.error(`fetchOneRSS ${source.name} error:`, e.message);
         return [];
     }
+}
+
+// ── Ambil berita dari semua sumber RSS ───────────────────────────────────────
+async function getBerita(quotaPerSource = 3) {
+    const results = await Promise.all(
+        RSS_SOURCES.map(src => fetchOneRSS(src, quotaPerSource))
+    );
+    // Gabungkan dan interleave agar tidak semua Antara dulu
+    const merged = [];
+    const maxLen = Math.max(...results.map(r => r.length));
+    for (let i = 0; i < maxLen; i++) {
+        for (const arr of results) {
+            if (arr[i]) merged.push(arr[i]);
+        }
+    }
+    return merged;
 }
 
 // ── Ambil info gempa terkini dari BMKG ───────────────────────────────────────
@@ -67,15 +108,14 @@ async function getGempa() {
         const g = json?.Infogempa?.gempa;
         if (!g) return [];
 
-        // Format: "Gempa M5.2 | Kedalaman 10 km | Kab. Xxx, Jawa | Tidak berpotensi tsunami"
-        const mag    = g.Magnitude  || '?';
-        const dalam  = g.Kedalaman  || '?';
-        const wilayah= g.Wilayah    || '?';
-        const potensi= g.Potensi    || '';
-        const tgl    = g.Tanggal    || '';
-        const jam    = g.Jam        || '';
+        const mag     = g.Magnitude || '?';
+        const dalam   = g.Kedalaman || '?';
+        const wilayah = g.Wilayah   || '?';
+        const potensi = g.Potensi   || '';
+        const tgl     = g.Tanggal   || '';
+        const jam     = g.Jam       || '';
 
-        const title = `Gempa M${mag} | Kedalaman ${dalam} | ${wilayah} | ${potensi} | ${tgl} ${jam}`;
+        const title = `Gempa M${mag} | ${dalam} | ${wilayah} | ${potensi} | ${tgl} ${jam}`;
         return [title.trim()];
     } catch (e) {
         console.error('getGempa error:', e.message);
@@ -83,28 +123,138 @@ async function getGempa() {
     }
 }
 
-// ── Ambil hadits acak dari API ────────────────────────────────────────────────
-async function getHadits() {
+// ── Ambil fakta unik Bahasa Indonesia ────────────────────────────────────────
+async function getFakta() {
     try {
-        // Ambil hadits nomor acak 1-100 dari kitab Muslim
-        const nomor = Math.floor(Math.random() * 100) + 1;
-        const url   = `https://api.hadith.gading.dev/books/muslim/${nomor}`;
-        const res   = await fetchWithTimeout(url);
-        const json  = await res.json();
-
-        const arab = json?.data?.contents?.arab || '';
-        const id   = json?.data?.contents?.id   || '';
-
-        if (id.length > 5) {
-            // Potong agar tidak terlalu panjang di matrix LED (maks ~200 char)
-            const trimmed = id.length > 180 ? id.substring(0, 177) + '...' : id;
-            return [`Hadits: ${trimmed}`];
+        const res  = await fetchWithTimeout(FAKTA_URL);
+        const json = await res.json();
+        const teks = json?.text || '';
+        if (teks.length > 5) {
+            const trimmed = teks.length > 180 ? teks.substring(0, 177) + '...' : teks;
+            return [`Fakta: ${trimmed}`];
         }
         return [];
     } catch (e) {
-        console.error('getHadits error:', e.message);
+        console.error('getFakta error:', e.message);
         return [];
     }
+}
+
+// ── Countdown hari libur nasional Indonesia ───────────────
+async function getLibur() {
+    try {
+        const res  = await fetchWithTimeout(LIBUR_URL);
+        const json = await res.json();
+
+        const today = new Date();
+        today.setHours(0, 0, 0, 0);
+
+        let nearest = null;
+        let minDiff = Infinity;
+
+        for (const [tgl, val] of Object.entries(json)) {
+            const d = new Date(tgl);
+            d.setHours(0, 0, 0, 0);
+            const diff = Math.round((d - today) / (1000 * 60 * 60 * 24));
+            if (diff >= 0 && diff < minDiff) {
+                minDiff = diff;
+                nearest = { nama: val.summary };
+            }
+        }
+
+        if (!nearest) return [];
+        const nama = nearest.nama || 'Hari Libur';
+        let label;
+        if (minDiff === 0)      label = `Hari ini Libur! ${nama}`;
+        else if (minDiff === 1) label = `Besok Libur! ${nama}`;
+        else                    label = `${nama} ${minDiff} hari lagi`;
+
+        return [label];
+    } catch (e) {
+        console.error('getLibur error:', e.message);
+        return [];
+    }
+}
+
+// ── Label waktu pertandingan (WIB) ───────────────────────────────────────────
+function getLabelWaktu(dateStr, timeStr) {
+    // dateStr: "2026-06-14", timeStr: "13:00:00" (UTC dari TheSportsDB)
+    try {
+        const utcStr = `${dateStr}T${timeStr}Z`;
+        const matchDate = new Date(utcStr);
+
+        const now = new Date();
+        // Konversi ke WIB (UTC+7)
+        const wibOffset = 7 * 60 * 60 * 1000;
+        const matchWIB  = new Date(matchDate.getTime() + wibOffset);
+        const nowWIB    = new Date(now.getTime() + wibOffset);
+
+        const matchDay = new Date(matchWIB);
+        matchDay.setHours(0, 0, 0, 0);
+        const todayDay = new Date(nowWIB);
+        todayDay.setHours(0, 0, 0, 0);
+
+        const diffDay = Math.round((matchDay - todayDay) / (1000 * 60 * 60 * 24));
+
+        const jam = matchWIB.getUTCHours();
+        const mnt = String(matchWIB.getUTCMinutes()).padStart(2, '0');
+        const jamStr = `${jam}:${mnt}`;
+
+        // Label waktu
+        let labelHari;
+        if (diffDay === 0) {
+            if (jam >= 15 && jam < 18)      labelHari = 'Sore ini';
+            else if (jam >= 18 && jam < 22) labelHari = 'Malam ini';
+            else if (jam >= 22 || jam < 4)  labelHari = 'Dini hari';
+            else                             labelHari = 'Hari ini';
+        } else if (diffDay === 1) {
+            labelHari = 'Besok';
+        } else {
+            // Format tanggal DD Mon
+            const bulan = ['Jan','Feb','Mar','Apr','Mei','Jun','Jul','Ags','Sep','Okt','Nov','Des'];
+            labelHari = `${matchWIB.getUTCDate()} ${bulan[matchWIB.getUTCMonth()]}`;
+        }
+
+        return `${labelHari} ${jamStr}`;
+    } catch {
+        return timeStr || '';
+    }
+}
+
+// ── Ambil jadwal bola dari TheSportsDB ───────────────────────────────────────
+async function getBola() {
+    // Hanya tampil sore (15:00) sampai dini hari (03:00 WIB)
+    const nowWIB = new Date(Date.now() + 7 * 60 * 60 * 1000);
+    const jamWIB = nowWIB.getUTCHours();
+    const aktif  = (jamWIB >= 15) || (jamWIB < 3);
+    if (!aktif) return [];
+
+    const hasil = [];
+
+    await Promise.all(LIGA_LIST.map(async (liga) => {
+        try {
+            const url = `https://www.thesportsdb.com/api/v1/json/3/eventsnextleague.php?id=${liga.id}`;
+            const res  = await fetchWithTimeout(url, 6000);
+            const json = await res.json();
+            const events = json?.events || [];
+
+            // Ambil MAX_MATCH_PER_LIGA pertandingan terdekat
+            const taken = events.slice(0, MAX_MATCH_PER_LIGA);
+            for (const ev of taken) {
+                const home   = ev.strHomeTeam || '?';
+                const away   = ev.strAwayTeam || '?';
+                const tgl    = ev.dateEvent   || '';
+                const time   = ev.strTime     || '00:00:00';
+                const label  = getLabelWaktu(tgl, time);
+                hasil.push(`[${liga.nama}] ${label} | ${home} vs ${away}`);
+            }
+        } catch (e) {
+            console.error(`getBola ${liga.nama} error:`, e.message);
+        }
+    }));
+
+    // Urutkan by waktu terdekat (sudah ada label tapi sort by raw time)
+    return hasil;
 }
 
 // ── Build RSS XML ─────────────────────────────────────────────────────────────
@@ -119,7 +269,7 @@ function buildRSS(items) {
   <channel>
     <title>JWS Ersa Cloud Feed</title>
     <link>https://api-jws-ersa.vercel.app</link>
-    <description>Aggregated feed untuk ESP32 Masjid Display</description>
+    <description>Aggregated feed untuk ESP32 Display</description>
     <lastBuildDate>${now}</lastBuildDate>
 ${itemsXml}  </channel>
 </rss>`;
@@ -127,32 +277,39 @@ ${itemsXml}  </channel>
 
 // ── Handler utama ─────────────────────────────────────────────────────────────
 export default async function handler(req, res) {
-    // CORS header agar bisa diakses dari mana saja
     res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Cache-Control', 's-maxage=300, stale-while-revalidate'); // cache 5 menit di Vercel edge
+    res.setHeader('Cache-Control', 's-maxage=300, stale-while-revalidate');
 
     const q = req.query || {};
-    const wantBerita = q.berita !== '0';  // default aktif kecuali eksplisit =0
-    const wantGempa  = q.gempa  === '1';
-    const wantHadits = q.hadits !== '0';  // default aktif kecuali eksplisit =0
+    const wantBerita = q.berita !== '0';
+    const wantGempa  = q.gempa  !== '0';
+    const wantBola   = q.bola   !== '0';
+    const wantFakta  = q.fakta  !== '0';
+    const wantLibur  = q.libur  !== '0';
 
-    // Jalankan semua fetch yang dibutuhkan secara paralel
-    const promises = [];
-    if (wantBerita) promises.push(getBerita(4));   else promises.push(Promise.resolve([]));
-    if (wantGempa)  promises.push(getGempa());     else promises.push(Promise.resolve([]));
-    if (wantHadits) promises.push(getHadits());    else promises.push(Promise.resolve([]));
+    // Jalankan semua fetch paralel
+    const [beritaItems, gempaItems, bolaItems, faktaItems, liburItems] = await Promise.all([
+        wantBerita ? getBerita(3)  : [],
+        wantGempa  ? getGempa()    : [],
+        wantBola   ? getBola()     : [],
+        wantFakta  ? getFakta()    : [],
+        wantLibur  ? getLibur()    : [],
+    ]);
 
-    const [beritaItems, gempaItems, haditsItems] = await Promise.all(promises);
-
-    // Gabungkan semua item
-    const allItems = [...beritaItems, ...gempaItems, ...haditsItems];
+    const allItems = [
+        ...liburItems,   // countdown libur paling atas
+        ...gempaItems,   // gempa prioritas kedua
+        ...bolaItems,    // jadwal bola
+        ...beritaItems,  // berita
+        ...faktaItems,   // fakta unik paling bawah
+    ];
 
     if (allItems.length === 0) {
-        // Fallback: kembalikan 1 item placeholder agar ESP32 tidak kosong
         allItems.push('Tidak ada data tersedia saat ini');
     }
 
     const xml = buildRSS(allItems);
     res.setHeader('Content-Type', 'application/xml; charset=utf-8');
     res.status(200).send(xml);
-          }
+            }
+                               
