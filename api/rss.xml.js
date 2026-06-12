@@ -250,7 +250,7 @@ function buildRSS(items) {
     const now = new Date().toUTCString();
     let itemsXml = '';
     for (const title of items) {
-        itemsXml += `  <item>\n    <title><![CDATA[${title}]]></title>\n  </item>\n`;
+        itemsXml += `  <item><title><![CDATA[${title}]]></title></item>\n`;
     }
     return `<?xml version="1.0" encoding="UTF-8"?>
 <rss version="2.0">
