@@ -161,50 +161,7 @@ async function getLibur() {
     }
 }
 
-// ── Label waktu pertandingan (WIB) ───────────────────────────────────────────
-function getLabelWaktu(dateStr, timeStr) {
-    // dateStr: "2026-06-14", timeStr: "13:00:00" (UTC dari TheSportsDB)
-    try {
-        const utcStr = `${dateStr}T${timeStr}Z`;
-        const matchDate = new Date(utcStr);
 
-        const now = new Date();
-        // Konversi ke WIB (UTC+7)
-        const wibOffset = 7 * 60 * 60 * 1000;
-        const matchWIB  = new Date(matchDate.getTime() + wibOffset);
-        const nowWIB    = new Date(now.getTime() + wibOffset);
-
-        const matchDay = new Date(matchWIB);
-        matchDay.setHours(0, 0, 0, 0);
-        const todayDay = new Date(nowWIB);
-        todayDay.setHours(0, 0, 0, 0);
-
-        const diffDay = Math.round((matchDay - todayDay) / (1000 * 60 * 60 * 24));
-
-        const jam = matchWIB.getUTCHours();
-        const mnt = String(matchWIB.getUTCMinutes()).padStart(2, '0');
-        const jamStr = `${jam}:${mnt}`;
-
-        // Label waktu
-        let labelHari;
-        if (diffDay === 0) {
-            if (jam >= 15 && jam < 18)      labelHari = 'Sore ini';
-            else if (jam >= 18 && jam < 22) labelHari = 'Malam ini';
-            else if (jam >= 22 || jam < 4)  labelHari = 'Dini hari';
-            else                             labelHari = 'Hari ini';
-        } else if (diffDay === 1) {
-            labelHari = 'Besok';
-        } else {
-            // Format tanggal DD Mon
-            const bulan = ['Jan','Feb','Mar','Apr','Mei','Jun','Jul','Ags','Sep','Okt','Nov','Des'];
-            labelHari = `${matchWIB.getUTCDate()} ${bulan[matchWIB.getUTCMonth()]}`;
-        }
-
-        return `${labelHari} ${jamStr}`;
-    } catch {
-        return timeStr || '';
-    }
-}
 // ── Ambil jadwal bola dari TheSportsDB ───────────────────────────────────────
 // ── Ambil jadwal bola dari TheSportsDB (Fix Bentrok Zona Waktu) ───────────────
 async function getBola() {
@@ -239,7 +196,15 @@ async function getBola() {
                 const away = ev.strAwayTeam || '?';
                 const jam  = String(wibDate.getUTCHours()).padStart(2, '0');
                 const mnt  = String(wibDate.getUTCMinutes()).padStart(2, '0');
-                const label = tglWIB === todayStr ? 'Hari ini' : 'Besok';
+                const jamInt = parseInt(jam);
+let label;
+if (tglWIB === todayStr) {
+    label = 'Hari ini';
+} else if (tglWIB === tomorrowStr && jamInt >= 0 && jamInt < 4) {
+    label = 'Dini hari';
+} else {
+    label = 'Besok';
+            }
 
                 hasil.push(`[${liga.nama}] ${label} ${jam}:${mnt} | ${home} vs ${away}`);
             }
