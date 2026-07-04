@@ -29,7 +29,7 @@ const LIGA_LIST = [
     { nama: 'La Liga',   id: 4335 },  // Spanish La Liga
     { nama: 'Serie A',   id: 4332 },  // Italian Serie A
     { nama: 'Bundesliga',id: 4331 },  // German Bundesliga
-    { nama: 'FIFA World Cup',     id: 4432 },  // FIFA World Cup
+    { nama: 'FIFA World Cup',     id: 4429 },  // FIFA World Cup
     { nama: 'Liga 1',    id: 4790 },  // Liga 1 Indonesia
 ];
 const MAX_MATCH_PER_LIGA = 3;
@@ -217,7 +217,7 @@ async function getBola() {
 
     await Promise.all(LIGA_LIST.map(async (liga) => {
         try {
-            const url = `https://www.thesportsdb.com/api/v1/json/3/eventsnextleague.php?id=${liga.id}`;
+            const url = `https://www.thesportsdb.com/api/v1/json/123/eventsnextleague.php?id=${liga.id}`;
             const res  = await fetchWithTimeout(url, 6000);
             const json = await res.json();
             const events = json?.events || [];
