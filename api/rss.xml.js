@@ -217,7 +217,7 @@ async function getBola() {
 
     await Promise.all(LIGA_LIST.map(async (liga) => {
         try {
-            const url = `https://www.thesportsdb.com/api/v1/json/123/eventsnextleague.php?id=${liga.id}`;
+            const url = `https://www.thesportsdb.com/api/v1/json/3/eventsnextleague.php?id=${liga.id}`;
             const res  = await fetchWithTimeout(url, 6000);
             const json = await res.json();
             const events = json?.events || [];
