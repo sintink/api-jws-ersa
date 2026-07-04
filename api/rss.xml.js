@@ -211,8 +211,11 @@ async function getBola() {
     const wibOffset = 7 * 60 * 60 * 1000;
     const nowWIB    = new Date(Date.now() + wibOffset);
 
-    // Tanggal hari ini dalam format YYYY-MM-DD (WIB)
     const todayStr = nowWIB.toISOString().substring(0, 10);
+    const tomorrowWIB = new Date(nowWIB);
+    tomorrowWIB.setUTCDate(tomorrowWIB.getUTCDate() + 1);
+    const tomorrowStr = tomorrowWIB.toISOString().substring(0, 10);
+
     const hasil = [];
 
     await Promise.all(LIGA_LIST.map(async (liga) => {
@@ -224,24 +227,21 @@ async function getBola() {
 
             for (const ev of events) {
                 const tgl  = ev.dateEvent || '';
-                const time = ev.strTime     || '00:00:00';
+                const time = ev.strTime   || '00:00:00';
 
-                // 1. Konversi dulu total waktu ke Date Object berbasis WIB
                 const utcDate = new Date(`${tgl}T${time}Z`);
                 const wibDate = new Date(utcDate.getTime() + wibOffset);
-                
-                // 2. Ambil tanggal asli hasil konversi WIB
-                const tglWIB = wibDate.toISOString().substring(0, 10);
+                const tglWIB  = wibDate.toISOString().substring(0, 10);
 
-                // 3. Filter "Hari ini saja" dilakukan di sini (memakai tglWIB)
-                if (tglWIB !== todayStr) continue;
+                if (tglWIB !== todayStr && tglWIB !== tomorrowStr) continue;
 
                 const home = ev.strHomeTeam || '?';
                 const away = ev.strAwayTeam || '?';
-                const jam = String(wibDate.getUTCHours()).padStart(2, '0');
-                const mnt = String(wibDate.getUTCMinutes()).padStart(2, '0');
+                const jam  = String(wibDate.getUTCHours()).padStart(2, '0');
+                const mnt  = String(wibDate.getUTCMinutes()).padStart(2, '0');
+                const label = tglWIB === todayStr ? 'Hari ini' : 'Besok';
 
-                hasil.push(`[${liga.nama}] ${jam}:${mnt} | ${home} vs ${away}`);
+                hasil.push(`[${liga.nama}] ${label} ${jam}:${mnt} | ${home} vs ${away}`);
             }
         } catch (e) {
             console.error(`getBola ${liga.nama} error:`, e.message);
@@ -249,8 +249,7 @@ async function getBola() {
     }));
 
     return hasil;
-}
-
+                    }
 
 // ── Build RSS XML ─────────────────────────────────────────────────────────────
 function buildRSS(items) {
