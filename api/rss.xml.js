@@ -206,13 +206,13 @@ function getLabelWaktu(dateStr, timeStr) {
     }
 }
 // ── Ambil jadwal bola dari TheSportsDB ───────────────────────────────────────
+// ── Ambil jadwal bola dari TheSportsDB (Fix Bentrok Zona Waktu) ───────────────
 async function getBola() {
     const wibOffset = 7 * 60 * 60 * 1000;
     const nowWIB    = new Date(Date.now() + wibOffset);
 
     // Tanggal hari ini dalam format YYYY-MM-DD (WIB)
     const todayStr = nowWIB.toISOString().substring(0, 10);
-
     const hasil = [];
 
     await Promise.all(LIGA_LIST.map(async (liga) => {
@@ -224,15 +224,20 @@ async function getBola() {
 
             for (const ev of events) {
                 const tgl  = ev.dateEvent || '';
-                if (tgl !== todayStr) continue;  // hanya hari ini
+                const time = ev.strTime     || '00:00:00';
+
+                // 1. Konversi dulu total waktu ke Date Object berbasis WIB
+                const utcDate = new Date(`${tgl}T${time}Z`);
+                const wibDate = new Date(utcDate.getTime() + wibOffset);
+                
+                // 2. Ambil tanggal asli hasil konversi WIB
+                const tglWIB = wibDate.toISOString().substring(0, 10);
+
+                // 3. Filter "Hari ini saja" dilakukan di sini (memakai tglWIB)
+                if (tglWIB !== todayStr) continue;
 
                 const home = ev.strHomeTeam || '?';
                 const away = ev.strAwayTeam || '?';
-                const time = ev.strTime     || '00:00:00';
-
-                // Konversi jam UTC → WIB
-                const utcDate = new Date(`${tgl}T${time}Z`);
-                const wibDate = new Date(utcDate.getTime() + wibOffset);
                 const jam = String(wibDate.getUTCHours()).padStart(2, '0');
                 const mnt = String(wibDate.getUTCMinutes()).padStart(2, '0');
 
@@ -245,6 +250,7 @@ async function getBola() {
 
     return hasil;
 }
+
 
 // ── Build RSS XML ─────────────────────────────────────────────────────────────
 function buildRSS(items) {
