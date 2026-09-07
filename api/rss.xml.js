@@ -1,38 +1,30 @@
 // api/rss_xml.js
 // Vercel Serverless Function — RSS + JSON Aggregator untuk ESP32 Display
 // Endpoint: GET /rss.xml?berita=1&gempa=1&bola=1&olahraga=1&libur=1
-//
-// Query params (default semua aktif, nonaktifkan dengan =0):
-//   berita=0   → matikan berita
-//   gempa=0    → matikan gempa
-//   bola=0     → matikan jadwal bola
-//   olahraga=0 → matikan berita olahraga
-//   libur=0    → matikan countdown hari libur
 
 // ── Sumber RSS Berita ─────────────────────────────────────────────────────────
 const RSS_SOURCES = [
-    { name: 'Antara',   url: 'https://www.antaranews.com/rss/terkini.xml' },
-    { name: 'CNN',      url: 'https://www.cnnindonesia.com/rss' },
-    { name: 'Detik',    url: 'https://finance.detik.com/rss' },
+    { name: 'Antara', url: 'https://www.antaranews.com/rss/terkini.xml' },
+    { name: 'CNN',    url: 'https://www.cnnindonesia.com/rss' },
+    { name: 'Detik',  url: 'https://finance.detik.com/rss' },
     { name: 'Tirto',  url: 'https://tirto.id/sitemap/r/google-discover' },
 ];
 
 // ── Sumber JSON ───────────────────────────────────────────────────────────────
 const BMKG_GEMPA   = 'https://data.bmkg.go.id/DataMKG/TEWS/autogempa.json';
 const RSS_OLAHRAGA = { name: 'Olahraga', url: 'https://www.cnnindonesia.com/olahraga/rss' };
-const LIBUR_URL = 'https://raw.githubusercontent.com/guangrei/APIHariLibur_V2/main/holidays.json';
+const LIBUR_URL    = 'https://raw.githubusercontent.com/guangrei/APIHariLibur_V2/main/holidays.json';
 
-// TheSportsDB — liga yang ditampilkan
-// id: league ID di TheSportsDB
+// TheSportsDB — 7 Liga Pilihan
 const LIGA_LIST = [
     { nama: 'EPL',       id: 4328 },  // English Premier League
     { nama: 'La Liga',   id: 4335 },  // Spanish La Liga
     { nama: 'Serie A',   id: 4332 },  // Italian Serie A
     { nama: 'Bundesliga',id: 4331 },  // German Bundesliga
-    { nama: 'FIFA World Cup',     id: 4429 },  // FIFA World Cup
+    { nama: 'UCL',       id: 4480 },  // UEFA Champions League
+    { nama: 'UEL',       id: 4359 },  // UEFA Europa League (Malam Jumat)
     { nama: 'Liga 1',    id: 4790 },  // Liga 1 Indonesia
 ];
-const MAX_MATCH_PER_LIGA = 3;
 
 // ── Fetch dengan timeout ──────────────────────────────────────────────────────
 async function fetchWithTimeout(url, ms = 8000) {
@@ -90,7 +82,6 @@ async function getBerita(quotaPerSource = 3) {
     const results = await Promise.all(
         RSS_SOURCES.map(src => fetchOneRSS(src, quotaPerSource))
     );
-    // Gabungkan dan interleave agar tidak semua Antara dulu
     const merged = [];
     const maxLen = Math.max(...results.map(r => r.length));
     for (let i = 0; i < maxLen; i++) {
@@ -124,8 +115,7 @@ async function getGempa() {
     }
 }
 
-
-// ── Countdown hari libur nasional Indonesia ───────────────
+// ── Countdown hari libur nasional Indonesia ──────────────────────────────────
 async function getLibur() {
     try {
         const res  = await fetchWithTimeout(LIBUR_URL);
@@ -161,135 +151,128 @@ async function getLibur() {
     }
 }
 
-
-// ── Ambil jadwal bola dari TheSportsDB ───────────────────────────────────────
+// ── Ambil Jadwal & Skor Bola dari TheSportsDB ────────────────────────────────
 async function getBola() {
-
     const wibOffset = 7 * 60 * 60 * 1000;
     let semuaMatch = [];
+    const sekarang = new Date(new Date().toLocaleString("en-US", { timeZone: "Asia/Jakarta" }));
+    const hariIni = new Date(sekarang.getFullYear(), sekarang.getMonth(), sekarang.getDate());
 
-    // ambil semua liga paralel
     await Promise.all(LIGA_LIST.map(async (liga) => {
         try {
-            const url =
-                `https://www.thesportsdb.com/api/v1/json/123/eventsnextleague.php?id=${liga.id}`;
+            const urlNext = `https://www.thesportsdb.com/api/v1/json/123/eventsnextleague.php?id=${liga.id}`;
+            const urlPast = `https://www.thesportsdb.com/api/v1/json/123/eventspastleague.php?id=${liga.id}`;
 
-            const res = await fetchWithTimeout(url, 6000);
-            const json = await res.json();
+            const [resNext, resPast] = await Promise.all([
+                fetchWithTimeout(urlNext, 6000),
+                fetchWithTimeout(urlPast, 6000)
+            ]);
 
-            const events = json?.events || [];
+            const [jsonNext, jsonPast] = await Promise.all([
+                resNext.json(),
+                resPast.json()
+            ]);
 
-            for (const ev of events) {
+            const eventsNext = jsonNext?.events || [];
+            const eventsPast = jsonPast?.events || [];
 
+            // 1. Jadwal Pertandingan Akan Datang
+            for (const ev of eventsNext) {
                 if (!ev.dateEvent) continue;
-
                 const time = ev.strTime || "00:00:00";
-
-                // UTC dari SportsDB → WIB
-                const utcDate =
-                    new Date(`${ev.dateEvent}T${time}Z`);
-
-                const wibDate =
-                    new Date(utcDate.getTime() + wibOffset);
-
+                const utcDate = new Date(`${ev.dateEvent}T${time}Z`);
+                const wibDate = new Date(utcDate.getTime() + wibOffset);
 
                 semuaMatch.push({
                     liga: liga.nama,
-                    tanggal: wibDate.toISOString().substring(0,10),
-                    jam:
-                        String(wibDate.getUTCHours()).padStart(2,'0')
-                        + ":" +
-                        String(wibDate.getUTCMinutes()).padStart(2,'0'),
-
+                    tanggal: wibDate.toISOString().substring(0, 10),
+                    jam: String(wibDate.getUTCHours()).padStart(2, '0') + ":" + String(wibDate.getUTCMinutes()).padStart(2, '0'),
                     home: ev.strHomeTeam || '?',
-                    away: ev.strAwayTeam || '?'
+                    away: ev.strAwayTeam || '?',
+                    status: 'upcoming',
+                    homeScore: null,
+                    awayScore: null
                 });
             }
 
-        } catch(e) {
+            // 2. Hasil Pertandingan Selesai / LIVE
+            for (const ev of eventsPast) {
+                if (!ev.dateEvent) continue;
+
+                const time = ev.strTime || "00:00:00";
+                const utcDate = new Date(`${ev.dateEvent}T${time}Z`);
+                const wibDate = new Date(utcDate.getTime() + wibOffset);
+                const status = ev.strStatus || '';
+
+                const homeScore = ev.intHomeScore !== null && ev.intHomeScore !== undefined ? parseInt(ev.intHomeScore) : null;
+                const awayScore = ev.intAwayScore !== null && ev.intAwayScore !== undefined ? parseInt(ev.intAwayScore) : null;
+
+                if (homeScore === null || awayScore === null) continue;
+
+                let statusLabel = 'FT';
+                if (['1H', '2H', 'HT', 'ET', 'P'].includes(status)) statusLabel = 'LIVE';
+
+                semuaMatch.push({
+                    liga: liga.nama,
+                    tanggal: wibDate.toISOString().substring(0, 10),
+                    jam: String(wibDate.getUTCHours()).padStart(2, '0') + ":" + String(wibDate.getUTCMinutes()).padStart(2, '0'),
+                    home: ev.strHomeTeam || '?',
+                    away: ev.strAwayTeam || '?',
+                    status: statusLabel,
+                    homeScore: homeScore,
+                    awayScore: awayScore
+                });
+            }
+
+        } catch (e) {
             console.error(`getBola ${liga.nama} error:`, e.message);
         }
     }));
 
+    if (semuaMatch.length === 0) return [];
 
-    if (semuaMatch.length === 0)
-        return [];
+    const hasilItems = [];
 
+    // ── OUTPUT JADWAL MENDATANG ──
+    const upcoming = semuaMatch.filter(m => m.status === 'upcoming');
+    if (upcoming.length > 0) {
+        upcoming.sort((a, b) => new Date(a.tanggal) - new Date(b.tanggal));
+        const tanggalTerdekat = upcoming[0].tanggal;
+        const target = new Date(tanggalTerdekat);
+        const hariLagi = Math.ceil((target - hariIni) / (1000 * 60 * 60 * 24));
 
-    // tanggal WIB hari ini
-    const sekarang =
-        new Date(new Date().toLocaleString(
-            "en-US",
-            { timeZone:"Asia/Jakarta" }
-        ));
+        let label;
+        if (hariLagi === 0) label = "Hari ini";
+        else if (hariLagi === 1) label = "Besok";
+        else label = `${hariLagi} hari lagi`;
 
+        upcoming.filter(m => m.tanggal === tanggalTerdekat).forEach(m => {
+            hasilItems.push(`[${m.liga}] ${label} ${m.jam} | ${m.home} vs ${m.away}`);
+        });
+    }
 
-    const hariIni = new Date(
-        sekarang.getFullYear(),
-        sekarang.getMonth(),
-        sekarang.getDate()
-    );
+    // ── OUTPUT HASIL SKOR (DIPOTONG & DIGABUNG 2 MATCH PER LIGA) ──
+    const livePast = semuaMatch.filter(m => m.status !== 'upcoming');
+    
+    // Kelompokkan skor berdasarkan Liganya
+    const skorPerLiga = {};
+    for (const m of livePast) {
+        if (!skorPerLiga[m.liga]) skorPerLiga[m.liga] = [];
+        
+        const textSkor = m.status === 'FT' 
+            ? `${m.home} ${m.homeScore}-${m.awayScore} ${m.away}`
+            : `[LIVE] ${m.home} ${m.homeScore}-${m.awayScore} ${m.away}`;
+            
+        skorPerLiga[m.liga].push(textSkor);
+    }
 
+    // Gabungkan maksimal 2 skor per liga dengan pemisah ' | '
+    for (const [namaLiga, listSkor] of Object.entries(skorPerLiga)) {
+        const duaSkor = listSkor.slice(0, 2).join(' | ');
+        hasilItems.push(`[Skor ${namaLiga}] ${duaSkor}`);
+    }
 
-    // buang pertandingan lama
-    semuaMatch = semuaMatch.filter(m => {
-
-        const d = new Date(m.tanggal);
-
-        return d >= hariIni;
-    });
-
-
-    if (semuaMatch.length === 0)
-        return [];
-
-
-    // cari tanggal pertandingan terdekat
-    semuaMatch.sort((a,b)=>
-        new Date(a.tanggal) -
-        new Date(b.tanggal)
-    );
-
-
-    const tanggalTerdekat =
-        semuaMatch[0].tanggal;
-
-
-    // hitung countdown
-    const target =
-        new Date(tanggalTerdekat);
-
-
-    const hariLagi =
-        Math.ceil(
-            (target - hariIni) /
-            (1000*60*60*24)
-        );
-
-
-    let label;
-
-    if (hariLagi === 0)
-        label = "Hari ini";
-
-    else if (hariLagi === 1)
-        label = "Besok";
-
-    else
-        label = `${hariLagi} hari lagi`;
-
-
-    // hanya pertandingan tanggal terdekat
-    const hasil =
-        semuaMatch.filter(m =>
-            m.tanggal === tanggalTerdekat
-        );
-
-
-    // buat item RSS satu per pertandingan
-    return hasil.map(m =>
-        `[${m.liga}] ${label} ${m.jam} | ${m.home} vs ${m.away}`
-    );
+    return hasilItems;
 }
 
 // ── Build RSS XML ─────────────────────────────────────────────────────────────
@@ -297,7 +280,7 @@ function buildRSS(items) {
     const now = new Date().toUTCString();
     let itemsXml = '';
     for (const title of items) {
-        itemsXml += `  <item><title><![CDATA[${title}]]></title></item>\n`;
+        itemsXml += `  <item><title><![CDATA[${escXml(title)}]]></title></item>\n`;
     }
     return `<?xml version="1.0" encoding="UTF-8"?>
 <rss version="2.0">
@@ -322,7 +305,6 @@ export default async function handler(req, res) {
     const wantOlahraga = q.olahraga !== '0';
     const wantLibur    = q.libur    !== '0';
 
-    // Jalankan semua fetch paralel
     const [beritaItems, gempaItems, bolaItems, olahragaItems, liburItems] = await Promise.all([
         wantBerita   ? getBerita(3)                  : [],
         wantGempa    ? getGempa()                    : [],
@@ -332,9 +314,9 @@ export default async function handler(req, res) {
     ]);
 
     const allItems = [
-        ...liburItems,    // countdown libur paling atas
-        ...gempaItems,    // gempa prioritas kedua
-        ...bolaItems,     // jadwal bola
+        ...liburItems,    // countdown libur
+        ...gempaItems,    // gempa
+        ...bolaItems,     // jadwal + skor bola
         ...olahragaItems, // berita olahraga
         ...beritaItems,   // berita umum
     ];
