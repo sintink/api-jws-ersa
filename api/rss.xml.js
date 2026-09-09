@@ -26,6 +26,9 @@ const LIGA_LIST = [
     { nama: 'Liga 1',    id: 4790 },  // Liga 1 Indonesia
 ];
 
+// ── Offset WIB (UTC+7) dalam milidetik — dipakai di beberapa tempat ───────────
+const WIB_OFFSET_MS = 7 * 60 * 60 * 1000;
+
 // ── Fetch dengan timeout ──────────────────────────────────────────────────────
 async function fetchWithTimeout(url, ms = 8000) {
     const controller = new AbortController();
@@ -40,15 +43,13 @@ async function fetchWithTimeout(url, ms = 8000) {
     }
 }
 
-// ── Escape XML special chars ──────────────────────────────────────────────────
-function escXml(str) {
+// ── Amankan teks sebelum dibungkus CDATA ──────────────────────────────────────
+// CDATA sudah literal (gak perlu escape entity kayak & < >), jadi kita CUMA
+// perlu jaga-jaga kalau title mentah dari sumber luar kebetulan mengandung
+// urutan "]]>" yang bisa menutup CDATA lebih awal dan merusak XML.
+function safeCData(str) {
     if (!str) return '';
-    return String(str)
-        .replace(/&/g, '&amp;')
-        .replace(/</g, '&lt;')
-        .replace(/>/g, '&gt;')
-        .replace(/"/g, '&quot;')
-        .replace(/'/g, '&apos;');
+    return String(str).replace(/]]>/g, ']]&gt;');
 }
 
 // ── Ambil berita dari satu RSS source ────────────────────────────────────────
@@ -121,15 +122,16 @@ async function getLibur() {
         const res  = await fetchWithTimeout(LIBUR_URL);
         const json = await res.json();
 
-        const today = new Date();
-        today.setHours(0, 0, 0, 0);
+        // "Hari ini" dihitung dari WIB, bukan dari timezone default server,
+        // supaya gak bergantung pada asumsi server jalan di UTC.
+        const wibNow = new Date(Date.now() + WIB_OFFSET_MS);
+        const today = new Date(Date.UTC(wibNow.getUTCFullYear(), wibNow.getUTCMonth(), wibNow.getUTCDate()));
 
         let nearest = null;
         let minDiff = Infinity;
 
         for (const [tgl, val] of Object.entries(json)) {
-            const d = new Date(tgl);
-            d.setHours(0, 0, 0, 0);
+            const d = new Date(tgl); // "YYYY-MM-DD" diparse sebagai UTC midnight
             const diff = Math.round((d - today) / (1000 * 60 * 60 * 24));
             if (diff >= 0 && diff < minDiff) {
                 minDiff = diff;
@@ -151,17 +153,19 @@ async function getLibur() {
     }
 }
 
-// ── Ambil Data Bola Terpisah Berdasarkan Jam Server (Asia/Jakarta) ────────────
+// ── Ambil Data Bola Terpisah Berdasarkan Jam WIB ─────────────────────────────
 async function getBola() {
     // 1. Variasi 50% Peluang (Biar gak melulu bawa bola)
     if (Math.random() >= 0.5) return [];
 
-    const wibOffset = 7 * 60 * 60 * 1000;
-    const sekarang = new Date(new Date().toLocaleString("en-US", { timeZone: "Asia/Jakarta" }));
-    const jamWIB = sekarang.getHours();
+    // Jam & tanggal WIB dihitung langsung dari offset UTC+7, tanpa lewat
+    // toLocaleString/parsing string — jadi gak bergantung pada timezone
+    // default runtime server.
+    const wibNow = new Date(Date.now() + WIB_OFFSET_MS);
+    const jamWIB = wibNow.getUTCHours();
     const isPagiSkor = (jamWIB >= 0 && jamWIB < 12); // True: 00:00-12:00 (SKOR) | False: 12:00-00:00 (JADWAL)
 
-    const hariIni = new Date(sekarang.getFullYear(), sekarang.getMonth(), sekarang.getDate());
+    const hariIni = new Date(Date.UTC(wibNow.getUTCFullYear(), wibNow.getUTCMonth(), wibNow.getUTCDate()));
     let semuaMatch = [];
 
     await Promise.all(LIGA_LIST.map(async (liga) => {
@@ -186,6 +190,9 @@ async function getBola() {
 
                     semuaMatch.push({
                         liga: liga.nama,
+                        // dipakai buat sort supaya skor yang diambil beneran yang terbaru,
+                        // TheSportsDB gak menjamin urutan eventspastleague.php terbaru-dulu
+                        waktuSort: `${ev.dateEvent}T${(ev.strTime || '00:00:00')}`,
                         home: ev.strHomeTeam || '?',
                         away: ev.strAwayTeam || '?',
                         status: statusLabel,
@@ -204,7 +211,7 @@ async function getBola() {
                     if (!ev.dateEvent) continue;
                     const time = ev.strTime || "00:00:00";
                     const utcDate = new Date(`${ev.dateEvent}T${time}Z`);
-                    const wibDate = new Date(utcDate.getTime() + wibOffset);
+                    const wibDate = new Date(utcDate.getTime() + WIB_OFFSET_MS);
 
                     semuaMatch.push({
                         liga: liga.nama,
@@ -225,12 +232,15 @@ async function getBola() {
     const hasilItems = [];
 
     if (isPagiSkor) {
+        // Urutkan dari yang paling baru dulu sebelum diambil 2 per liga
+        semuaMatch.sort((a, b) => new Date(b.waktuSort) - new Date(a.waktuSort));
+
         // ── FORMAT OUTPUT SKOR (PAGI) ──
         // Menggabungkan 2 skor per liga ke dalam 1 baris text
         const skorPerLiga = {};
         for (const m of semuaMatch) {
             if (!skorPerLiga[m.liga]) skorPerLiga[m.liga] = [];
-            const textSkor = m.status === 'FT' 
+            const textSkor = m.status === 'FT'
                 ? `${m.home} ${m.homeScore}-${m.awayScore} ${m.away} (FT)`
                 : `[LIVE] ${m.home} ${m.homeScore}-${m.awayScore} ${m.away}`;
             skorPerLiga[m.liga].push(textSkor);
@@ -244,14 +254,14 @@ async function getBola() {
         // ── FORMAT OUTPUT JADWAL (SIANG-MALAM) ──
         // Menggabungkan 2 jadwal terdekat per liga ke dalam 1 baris text
         semuaMatch.sort((a, b) => new Date(a.tanggal) - new Date(b.tanggal));
-        
+
         const jadwalPerLiga = {};
         for (const m of semuaMatch) {
             if (!jadwalPerLiga[m.liga]) jadwalPerLiga[m.liga] = [];
-            
+
             const target = new Date(m.tanggal);
             const hariLagi = Math.ceil((target - hariIni) / (1000 * 60 * 60 * 24));
-            
+
             let labelHari;
             if (hariLagi <= 0) labelHari = "Nanti";
             else if (hariLagi === 1) labelHari = "Besok";
@@ -275,7 +285,8 @@ function buildRSS(items) {
     const now = new Date().toUTCString();
     let itemsXml = '';
     for (const title of items) {
-        itemsXml += `  <item><title><![CDATA[${escXml(title)}]]></title></item>\n`;
+        // CDATA sudah literal — JANGAN escape entity di sini, cukup jaga "]]>"
+        itemsXml += `  <item><title><![CDATA[${safeCData(title)}]]></title></item>\n`;
     }
     return `<?xml version="1.0" encoding="UTF-8"?>
 <rss version="2.0">
@@ -324,5 +335,5 @@ export default async function handler(req, res) {
     const xml = buildRSS(allItems);
     res.setHeader('Content-Type', 'application/xml; charset=utf-8');
     res.status(200).send(xml);
-            }
-        
+               }
+                        
