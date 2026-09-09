@@ -188,6 +188,18 @@ async function getLibur() {
     }
 }
 
+// ── Acak urutan array (Fisher-Yates) ──────────────────────────────────────────
+// Dipakai supaya kalau liga yang punya data lebih dari kuota tampil, tiap
+// refresh cache gantian liga mana yang kebagian slot — gak melulu liga yang sama.
+function shuffleArray(arr) {
+    const a = [...arr];
+    for (let i = a.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [a[i], a[j]] = [a[j], a[i]];
+    }
+    return a;
+}
+
 // ── Ambil Data Bola: Skor Kemarin/Hari Ini + Jadwal Berikutnya ───────────────
 async function getBola() {
     // Batas tanggal WIB: "kemarin" jadi cutoff paling tua buat skor —
@@ -279,7 +291,8 @@ async function getBola() {
         for (const [namaLiga, listSkor] of Object.entries(skorPerLiga)) {
             skorItems.push(`[Skor ${namaLiga}] ${listSkor.slice(0, 2).join(' | ')}`);
         }
-        hasilItems.push(...skorItems.slice(0, 3)); // maks 3 liga buat skor
+        // Diacak dulu biar liga yang kebagian slot gantian tiap refresh, gak pilih kasih
+        hasilItems.push(...shuffleArray(skorItems).slice(0, 3)); // maks 3 liga buat skor
     }
 
     // ── FORMAT JADWAL ──
@@ -303,7 +316,8 @@ async function getBola() {
         for (const [namaLiga, listJadwal] of Object.entries(jadwalPerLiga)) {
             jadwalItems.push(`[Jadwal ${namaLiga}] ${listJadwal.slice(0, 2).join(' | ')}`);
         }
-        hasilItems.push(...jadwalItems.slice(0, 3)); // maks 3 liga buat jadwal
+        // Diacak dulu biar liga yang kebagian slot gantian tiap refresh, gak pilih kasih
+        hasilItems.push(...shuffleArray(jadwalItems).slice(0, 3)); // maks 3 liga buat jadwal
     }
 
     return hasilItems;
@@ -340,14 +354,14 @@ export default async function handler(req, res) {
     const wantOlahraga = q.olahraga !== '0';
     const wantLibur    = q.libur    !== '0';
 
-    const TARGET_TOTAL        = 12; // target jumlah item total di RSS
-    const MIN_QUOTA_PER_SUMBER = 2; // minimal tiap sumber berita tetep disertakan
-    const MAX_QUOTA_PER_SUMBER = 6; // biar gak minta kebanyakan ke satu sumber aja
+    const TARGET_TOTAL          = 12; // target jumlah item total di RSS
+    const BERITA_QUOTA_PER_SUMBER = 8; // kuota digenerouskan — kalau 1-2 sumber lagi basi,
+                                        // sumber yang masih fresh tetep bisa nutupin ke TARGET_TOTAL
 
     // Kategori non-berita di-fetch duluan (libur/gempa/olahraga/bola sering
     // ke-filter jadi kosong oleh aturan freshness/dirasakan/countdown), baru
-    // setelah itu kita tahu berapa banyak slot berita yang perlu ditambal
-    // biar totalnya tetep mendekati TARGET_TOTAL.
+    // setelah itu berita di-fetch dengan kuota gede per sumber — final list
+    // dipotong ke TARGET_TOTAL di akhir.
     const [liburItems, gempaItems, olahragaItems, bolaItems] = await Promise.all([
         wantLibur    ? getLibur()                              : [],
         wantGempa    ? getGempa()                              : [],
@@ -355,13 +369,7 @@ export default async function handler(req, res) {
         wantBola     ? getBola()                                : [],
     ]);
 
-    const nonBeritaCount = liburItems.length + gempaItems.length + olahragaItems.length + bolaItems.length;
-    const neededBerita   = Math.max(0, TARGET_TOTAL - nonBeritaCount);
-    const quotaPerSumber = wantBerita
-        ? Math.min(MAX_QUOTA_PER_SUMBER, Math.max(MIN_QUOTA_PER_SUMBER, Math.ceil(neededBerita / RSS_SOURCES.length)))
-        : 0;
-
-    const beritaItems = wantBerita ? await getBerita(quotaPerSumber) : [];
+    const beritaItems = wantBerita ? await getBerita(BERITA_QUOTA_PER_SUMBER) : [];
 
     // Berita & Info BMKG/Libur ditaruh di depan, BOLA disuntikkan di paling ekor
     let allItems = [
@@ -387,4 +395,4 @@ export default async function handler(req, res) {
     res.setHeader('Content-Type', 'application/xml; charset=utf-8');
     res.status(200).send(xml);
             }
-                                                           
+               
