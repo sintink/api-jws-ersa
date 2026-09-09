@@ -53,12 +53,35 @@ function safeCData(str) {
 }
 
 // ── Ambil berita dari satu RSS source ────────────────────────────────────────
-async function fetchOneRSS(source, quota = 3) {
+// label   -> prefix tampilan, misal 'Berita' atau 'Olahraga'
+// maxAgeHours -> kalau item terbaru sumber ini lebih tua dari ini, skip semua
+//                (biar gak nampilin berita basi yang berulang-ulang)
+async function fetchOneRSS(source, quota = 3, label = 'Berita', maxAgeHours = 3) {
     try {
         const res = await fetchWithTimeout(source.url);
         const xml = await res.text();
-        const items = [];
+
         const itemRegex = /<item>[\s\S]*?<\/item>/g;
+        const pubDateRegex = /<pubDate>([\s\S]*?)<\/pubDate>/;
+
+        // Cek freshness dari item pertama (RSS umumnya urut terbaru duluan).
+        const firstItemMatch = itemRegex.exec(xml);
+        if (firstItemMatch) {
+            const pubDateMatch = pubDateRegex.exec(firstItemMatch[0]);
+            if (pubDateMatch) {
+                const pubDate = new Date(pubDateMatch[1].trim());
+                if (!isNaN(pubDate.getTime())) {
+                    const ageHours = (Date.now() - pubDate.getTime()) / (1000 * 60 * 60);
+                    if (ageHours > maxAgeHours) {
+                        console.log(`fetchOneRSS ${source.name}: basi (${ageHours.toFixed(1)}j), di-skip`);
+                        return [];
+                    }
+                }
+            }
+        }
+        itemRegex.lastIndex = 0; // reset biar loop title mulai dari item pertama lagi
+
+        const items = [];
         const titleRegex = /<title><!\[CDATA\[([\s\S]*?)\]\]><\/title>|<title>([\s\S]*?)<\/title>/;
         let match;
         while ((match = itemRegex.exec(xml)) !== null && items.length < quota) {
@@ -67,7 +90,7 @@ async function fetchOneRSS(source, quota = 3) {
             if (titleMatch) {
                 const title = (titleMatch[1] || titleMatch[2] || '').trim();
                 if (title.length > 3) {
-                    items.push(`[Berita] ${title}`);
+                    items.push(`[${label}] ${title}`);
                 }
             }
         }
@@ -81,7 +104,7 @@ async function fetchOneRSS(source, quota = 3) {
 // ── Ambil berita dari semua sumber RSS ───────────────────────────────────────
 async function getBerita(quotaPerSource = 3) {
     const results = await Promise.all(
-        RSS_SOURCES.map(src => fetchOneRSS(src, quotaPerSource))
+        RSS_SOURCES.map(src => fetchOneRSS(src, quotaPerSource, 'Berita'))
     );
     const merged = [];
     const maxLen = Math.max(...results.map(r => r.length));
@@ -100,6 +123,16 @@ async function getGempa() {
         const json = await res.json();
         const g = json?.Infogempa?.gempa;
         if (!g) return [];
+
+        // Cuma tampilkan kalau ada laporan "dirasakan" masyarakat — skip gempa
+        // kecil/rutin yang gak kerasa siapa-siapa biar gak spam.
+        const dirasakanField = (g.Dirasakan || '').trim();
+        const potensiField   = (g.Potensi || '').trim();
+        const adaLaporanDirasakan =
+            (dirasakanField !== '' && dirasakanField !== '-') ||
+            /dirasakan/i.test(potensiField);
+
+        if (!adaLaporanDirasakan) return [];
 
         const mag     = g.Magnitude || '?';
         const dalam   = g.Kedalaman || '?';
@@ -139,7 +172,9 @@ async function getLibur() {
             }
         }
 
-        if (!nearest) return [];
+        // Biar gak spam countdown libur yang masih jauh, cuma tampilkan kalau
+        // sisa harinya 7 hari atau kurang.
+        if (!nearest || minDiff > 7) return [];
         const nama = nearest.nama || 'Hari Libur';
         let label;
         if (minDiff === 0)      label = `Hari ini Libur! ${nama}`;
@@ -154,9 +189,10 @@ async function getLibur() {
 }
 
 // ── Ambil Data Bola Terpisah Berdasarkan Jam WIB ─────────────────────────────
-async function getBola() {
+async function getBola(forceShow = false) {
     // 1. Variasi 50% Peluang (Biar gak melulu bawa bola)
-    if (Math.random() >= 0.5) return [];
+    // forceShow=true (lewat ?forceBola=1) bypass random ini, buat testing.
+    if (!forceShow && Math.random() >= 0.5) return [];
 
     // Jam & tanggal WIB dihitung langsung dari offset UTC+7, tanpa lewat
     // toLocaleString/parsing string — jadi gak bergantung pada timezone
@@ -310,13 +346,14 @@ export default async function handler(req, res) {
     const wantBola     = q.bola     !== '0';
     const wantOlahraga = q.olahraga !== '0';
     const wantLibur    = q.libur    !== '0';
+    const forceBola    = q.forceBola === '1'; // debug: paksa bola muncul, skip random 50%
 
     const [liburItems, gempaItems, olahragaItems, beritaItems, bolaItems] = await Promise.all([
-        wantLibur    ? getLibur()                    : [],
-        wantGempa    ? getGempa()                    : [],
-        wantOlahraga ? fetchOneRSS(RSS_OLAHRAGA, 3)  : [],
-        wantBerita   ? getBerita(3)                  : [],
-        wantBola     ? getBola()                     : [], // Di-fetch di akhir untuk ekor RSS
+        wantLibur    ? getLibur()                              : [],
+        wantGempa    ? getGempa()                              : [],
+        wantOlahraga ? fetchOneRSS(RSS_OLAHRAGA, 3, 'Olahraga') : [],
+        wantBerita   ? getBerita(3)                            : [],
+        wantBola     ? getBola(forceBola)                      : [], // Di-fetch di akhir untuk ekor RSS
     ]);
 
     // Berita & Info BMKG/Libur ditaruh di depan, BOLA disuntikkan di paling ekor
@@ -335,5 +372,5 @@ export default async function handler(req, res) {
     const xml = buildRSS(allItems);
     res.setHeader('Content-Type', 'application/xml; charset=utf-8');
     res.status(200).send(xml);
-               }
-                        
+                 }
+                
