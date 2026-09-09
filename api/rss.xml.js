@@ -189,11 +189,7 @@ async function getLibur() {
 }
 
 // ── Ambil Data Bola Terpisah Berdasarkan Jam WIB ─────────────────────────────
-async function getBola(forceShow = false) {
-    // 1. Variasi 50% Peluang (Biar gak melulu bawa bola)
-    // forceShow=true (lewat ?forceBola=1) bypass random ini, buat testing.
-    if (!forceShow && Math.random() >= 0.5) return [];
-
+async function getBola() {
     // Jam & tanggal WIB dihitung langsung dari offset UTC+7, tanpa lewat
     // toLocaleString/parsing string — jadi gak bergantung pada timezone
     // default runtime server.
@@ -312,8 +308,8 @@ async function getBola(forceShow = false) {
         }
     }
 
-    // Ambil maksimal 2 item variasi bola saja biar ekor RSS tidak kepanjangan
-    return hasilItems.slice(0, 2);
+    // Ambil sampai 4 liga (bukan cuma 2) biar ekor RSS lebih rame
+    return hasilItems.slice(0, 4);
 }
 
 // ── Build RSS XML ─────────────────────────────────────────────────────────────
@@ -346,24 +342,45 @@ export default async function handler(req, res) {
     const wantBola     = q.bola     !== '0';
     const wantOlahraga = q.olahraga !== '0';
     const wantLibur    = q.libur    !== '0';
-    const forceBola    = q.forceBola === '1'; // debug: paksa bola muncul, skip random 50%
 
-    const [liburItems, gempaItems, olahragaItems, beritaItems, bolaItems] = await Promise.all([
+    const TARGET_TOTAL        = 12; // target jumlah item total di RSS
+    const MIN_QUOTA_PER_SUMBER = 2; // minimal tiap sumber berita tetep disertakan
+    const MAX_QUOTA_PER_SUMBER = 6; // biar gak minta kebanyakan ke satu sumber aja
+
+    // Kategori non-berita di-fetch duluan (libur/gempa/olahraga/bola sering
+    // ke-filter jadi kosong oleh aturan freshness/dirasakan/countdown), baru
+    // setelah itu kita tahu berapa banyak slot berita yang perlu ditambal
+    // biar totalnya tetep mendekati TARGET_TOTAL.
+    const [liburItems, gempaItems, olahragaItems, bolaItems] = await Promise.all([
         wantLibur    ? getLibur()                              : [],
         wantGempa    ? getGempa()                              : [],
         wantOlahraga ? fetchOneRSS(RSS_OLAHRAGA, 3, 'Olahraga') : [],
-        wantBerita   ? getBerita(3)                            : [],
-        wantBola     ? getBola(forceBola)                      : [], // Di-fetch di akhir untuk ekor RSS
+        wantBola     ? getBola()                                : [],
     ]);
 
+    const nonBeritaCount = liburItems.length + gempaItems.length + olahragaItems.length + bolaItems.length;
+    const neededBerita   = Math.max(0, TARGET_TOTAL - nonBeritaCount);
+    const quotaPerSumber = wantBerita
+        ? Math.min(MAX_QUOTA_PER_SUMBER, Math.max(MIN_QUOTA_PER_SUMBER, Math.ceil(neededBerita / RSS_SOURCES.length)))
+        : 0;
+
+    const beritaItems = wantBerita ? await getBerita(quotaPerSumber) : [];
+
     // Berita & Info BMKG/Libur ditaruh di depan, BOLA disuntikkan di paling ekor
-    const allItems = [
+    let allItems = [
         ...liburItems,    // Countdown libur
         ...gempaItems,    // Info Gempa BMKG
         ...beritaItems,   // Berita umum
         ...olahragaItems, // Berita olahraga
         ...bolaItems,     // BONUS EKOR: Skor (00-12) ATAU Jadwal (12-00)
     ];
+
+    // Kalau kebetulan kelebihan (semua kategori pas rame bareng), potong ke
+    // TARGET_TOTAL. Kalau kurang (misal semua sumber berita lagi basi bareng),
+    // dibiarkan apa adanya — daripada maksa nampilin yang basi cuma buat ngejar angka.
+    if (allItems.length > TARGET_TOTAL) {
+        allItems = allItems.slice(0, TARGET_TOTAL);
+    }
 
     if (allItems.length === 0) {
         allItems.push('Tidak ada data tersedia saat ini');
@@ -372,5 +389,5 @@ export default async function handler(req, res) {
     const xml = buildRSS(allItems);
     res.setHeader('Content-Type', 'application/xml; charset=utf-8');
     res.status(200).send(xml);
-                 }
-                
+            }
+        
