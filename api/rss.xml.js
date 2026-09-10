@@ -369,20 +369,29 @@ export default async function handler(req, res) {
         wantBola     ? getBola()                                : [],
     ]);
 
-    const beritaItems = wantBerita ? await getBerita(BERITA_QUOTA_PER_SUMBER) : [];
+    const beritaItemsMentah = wantBerita ? await getBerita(BERITA_QUOTA_PER_SUMBER) : [];
+
+    // FIX: reservasi dulu slot buat kategori non-berita (libur/gempa/olahraga/bola)
+    // sebelum berita dijatah sisanya. Sebelumnya beritaItems (bisa sampai 32 item
+    // karena BERITA_QUOTA_PER_SUMBER x 4 sumber) ditaruh SEBELUM olahraga & bola
+    // lalu semuanya di-slice(0, TARGET_TOTAL) — akibatnya begitu berita saja sudah
+    // >= TARGET_TOTAL, olahraga & bola (yang mestinya jadi "ekor" tetap) selalu
+    // kepotong duluan meski datanya berhasil di-fetch.
+    const nonBeritaCount = liburItems.length + gempaItems.length + olahragaItems.length + bolaItems.length;
+    const sisaUntukBerita = Math.max(TARGET_TOTAL - nonBeritaCount, 0);
+    const beritaItems = beritaItemsMentah.slice(0, sisaUntukBerita);
 
     // Berita & Info BMKG/Libur ditaruh di depan, BOLA disuntikkan di paling ekor
     let allItems = [
         ...liburItems,    // Countdown libur
         ...gempaItems,    // Info Gempa BMKG
-        ...beritaItems,   // Berita umum
+        ...beritaItems,   // Berita umum (sudah dijatah sesuai sisa slot)
         ...olahragaItems, // Berita olahraga
         ...bolaItems,     // BONUS EKOR: Skor (00-12) ATAU Jadwal (12-00)
     ];
 
-    // Kalau kebetulan kelebihan (semua kategori pas rame bareng), potong ke
-    // TARGET_TOTAL. Kalau kurang (misal semua sumber berita lagi basi bareng),
-    // dibiarkan apa adanya — daripada maksa nampilin yang basi cuma buat ngejar angka.
+    // Jaga-jaga kalau nonBeritaCount sendiri sudah > TARGET_TOTAL (jarang terjadi,
+    // tapi tetap dipotong biar gak melebihi target di ESP32).
     if (allItems.length > TARGET_TOTAL) {
         allItems = allItems.slice(0, TARGET_TOTAL);
     }
@@ -394,5 +403,5 @@ export default async function handler(req, res) {
     const xml = buildRSS(allItems);
     res.setHeader('Content-Type', 'application/xml; charset=utf-8');
     res.status(200).send(xml);
-            }
-               
+}
+    
