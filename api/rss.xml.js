@@ -335,12 +335,13 @@ export default async function handler(req, res) {
         allItems.push('Tidak ada data tersedia saat ini');
     }
 
-    // Perubahan Utama: Output dikirim sebagai JSON murni
+        // Output JSON rapi (Pretty Print) biar gampang dihitung di browser
     res.setHeader('Content-Type', 'application/json; charset=utf-8');
-    res.status(200).json({
+    res.status(200).send(JSON.stringify({
         status: "success",
         total: allItems.length,
         items: allItems
-    });
+    }, null, 2));
+    
             }
             
