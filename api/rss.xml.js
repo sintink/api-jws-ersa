@@ -1,6 +1,6 @@
-// api/rss_xml.js
+// api/rss_xml.js (Sekarang output JSON murni)
 // Vercel Serverless Function — RSS + JSON Aggregator untuk ESP32 Display
-// Endpoint: GET /rss.xml?berita=1&gempa=1&bola=1&olahraga=1&libur=1
+// Endpoint: GET /rss.xml?berita=1&gempa=1&bola=1&olahraga=1&libur=1 (atau /rss.json)
 
 // ── Sumber RSS Berita ─────────────────────────────────────────────────────────
 const RSS_SOURCES = [
@@ -26,7 +26,7 @@ const LIGA_LIST = [
     { nama: 'Liga 1',    id: 4790 },  // Liga 1 Indonesia
 ];
 
-// ── Offset WIB (UTC+7) dalam milidetik — dipakai di beberapa tempat ───────────
+// ── Offset WIB (UTC+7) dalam milidetik ───────────────────────────────────────
 const WIB_OFFSET_MS = 7 * 60 * 60 * 1000;
 
 // ── Fetch dengan timeout ──────────────────────────────────────────────────────
@@ -43,19 +43,7 @@ async function fetchWithTimeout(url, ms = 8000) {
     }
 }
 
-// ── Amankan teks sebelum dibungkus CDATA ──────────────────────────────────────
-// CDATA sudah literal (gak perlu escape entity kayak & < >), jadi kita CUMA
-// perlu jaga-jaga kalau title mentah dari sumber luar kebetulan mengandung
-// urutan "]]>" yang bisa menutup CDATA lebih awal dan merusak XML.
-function safeCData(str) {
-    if (!str) return '';
-    return String(str).replace(/]]>/g, ']]&gt;');
-}
-
 // ── Ambil berita dari satu RSS source ────────────────────────────────────────
-// label   -> prefix tampilan, misal 'Berita' atau 'Olahraga'
-// maxAgeHours -> kalau item terbaru sumber ini lebih tua dari ini, skip semua
-//                (biar gak nampilin berita basi yang berulang-ulang)
 async function fetchOneRSS(source, quota = 3, label = 'Berita', maxAgeHours = 3) {
     try {
         const res = await fetchWithTimeout(source.url);
@@ -64,7 +52,6 @@ async function fetchOneRSS(source, quota = 3, label = 'Berita', maxAgeHours = 3)
         const itemRegex = /<item>[\s\S]*?<\/item>/g;
         const pubDateRegex = /<pubDate>([\s\S]*?)<\/pubDate>/;
 
-        // Cek freshness dari item pertama (RSS umumnya urut terbaru duluan).
         const firstItemMatch = itemRegex.exec(xml);
         if (firstItemMatch) {
             const pubDateMatch = pubDateRegex.exec(firstItemMatch[0]);
@@ -73,13 +60,12 @@ async function fetchOneRSS(source, quota = 3, label = 'Berita', maxAgeHours = 3)
                 if (!isNaN(pubDate.getTime())) {
                     const ageHours = (Date.now() - pubDate.getTime()) / (1000 * 60 * 60);
                     if (ageHours > maxAgeHours) {
-                        console.log(`fetchOneRSS ${source.name}: basi (${ageHours.toFixed(1)}j), di-skip`);
                         return [];
                     }
                 }
             }
         }
-        itemRegex.lastIndex = 0; // reset biar loop title mulai dari item pertama lagi
+        itemRegex.lastIndex = 0;
 
         const items = [];
         const titleRegex = /<title><!\[CDATA\[([\s\S]*?)\]\]><\/title>|<title>([\s\S]*?)<\/title>/;
@@ -124,8 +110,6 @@ async function getGempa() {
         const g = json?.Infogempa?.gempa;
         if (!g) return [];
 
-        // Cuma tampilkan kalau ada laporan "dirasakan" masyarakat — skip gempa
-        // kecil/rutin yang gak kerasa siapa-siapa biar gak spam.
         const dirasakanField = (g.Dirasakan || '').trim();
         const potensiField   = (g.Potensi || '').trim();
         const adaLaporanDirasakan =
@@ -155,8 +139,6 @@ async function getLibur() {
         const res  = await fetchWithTimeout(LIBUR_URL);
         const json = await res.json();
 
-        // "Hari ini" dihitung dari WIB, bukan dari timezone default server,
-        // supaya gak bergantung pada asumsi server jalan di UTC.
         const wibNow = new Date(Date.now() + WIB_OFFSET_MS);
         const today = new Date(Date.UTC(wibNow.getUTCFullYear(), wibNow.getUTCMonth(), wibNow.getUTCDate()));
 
@@ -164,7 +146,7 @@ async function getLibur() {
         let minDiff = Infinity;
 
         for (const [tgl, val] of Object.entries(json)) {
-            const d = new Date(tgl); // "YYYY-MM-DD" diparse sebagai UTC midnight
+            const d = new Date(tgl);
             const diff = Math.round((d - today) / (1000 * 60 * 60 * 24));
             if (diff >= 0 && diff < minDiff) {
                 minDiff = diff;
@@ -172,8 +154,6 @@ async function getLibur() {
             }
         }
 
-        // Biar gak spam countdown libur yang masih jauh, cuma tampilkan kalau
-        // sisa harinya 7 hari atau kurang.
         if (!nearest || minDiff > 7) return [];
         const nama = nearest.nama || 'Hari Libur';
         let label;
@@ -188,9 +168,7 @@ async function getLibur() {
     }
 }
 
-// ── Acak urutan array (Fisher-Yates) ──────────────────────────────────────────
-// Dipakai supaya kalau liga yang punya data lebih dari kuota tampil, tiap
-// refresh cache gantian liga mana yang kebagian slot — gak melulu liga yang sama.
+// ── Acak urutan array ──────────────────────────────────────────────────────────
 function shuffleArray(arr) {
     const a = [...arr];
     for (let i = a.length - 1; i > 0; i--) {
@@ -200,10 +178,8 @@ function shuffleArray(arr) {
     return a;
 }
 
-// ── Ambil Data Bola: Skor Kemarin/Hari Ini + Jadwal Berikutnya ───────────────
+// ── Ambil Data Bola ───────────────────────────────────────────────────────────
 async function getBola() {
-    // Batas tanggal WIB: "kemarin" jadi cutoff paling tua buat skor —
-    // skor yang lebih dari itu (2+ hari lalu) di-skip.
     const wibNow      = new Date(Date.now() + WIB_OFFSET_MS);
     const hariIniWIB  = new Date(Date.UTC(wibNow.getUTCFullYear(), wibNow.getUTCMonth(), wibNow.getUTCDate()));
     const kemarinWIB  = new Date(hariIniWIB.getTime() - 24 * 60 * 60 * 1000);
@@ -212,7 +188,6 @@ async function getBola() {
     let semuaJadwal = [];
 
     await Promise.all(LIGA_LIST.map(async (liga) => {
-        // ── SKOR: pertandingan kemarin & hari ini ──
         try {
             const urlPast = `https://www.thesportsdb.com/api/v1/json/123/eventspastleague.php?id=${liga.id}`;
             const resPast = await fetchWithTimeout(urlPast, 6000);
@@ -225,7 +200,6 @@ async function getBola() {
                 const awayScore = ev.intAwayScore !== null && ev.intAwayScore !== undefined ? parseInt(ev.intAwayScore) : null;
                 if (homeScore === null || awayScore === null) continue;
 
-                // Skip skor yang lebih tua dari kemarin (2+ hari lalu)
                 const tglMatch = new Date(`${ev.dateEvent}T00:00:00Z`);
                 if (tglMatch.getTime() < kemarinWIB.getTime()) continue;
 
@@ -235,7 +209,6 @@ async function getBola() {
 
                 semuaSkor.push({
                     liga: liga.nama,
-                    // dipakai buat sort supaya skor yang diambil beneran yang terbaru
                     waktuSort: `${ev.dateEvent}T${(ev.strTime || '00:00:00')}`,
                     home: ev.strHomeTeam || '?',
                     away: ev.strAwayTeam || '?',
@@ -248,7 +221,6 @@ async function getBola() {
             console.error(`getBola skor ${liga.nama} error:`, e.message);
         }
 
-        // ── JADWAL: pertandingan berikutnya ──
         try {
             const urlNext = `https://www.thesportsdb.com/api/v1/json/123/eventsnextleague.php?id=${liga.id}`;
             const resNext = await fetchWithTimeout(urlNext, 6000);
@@ -276,7 +248,6 @@ async function getBola() {
 
     const hasilItems = [];
 
-    // ── FORMAT SKOR ──
     if (semuaSkor.length > 0) {
         semuaSkor.sort((a, b) => new Date(b.waktuSort) - new Date(a.waktuSort));
         const skorPerLiga = {};
@@ -291,11 +262,9 @@ async function getBola() {
         for (const [namaLiga, listSkor] of Object.entries(skorPerLiga)) {
             skorItems.push(`[Skor ${namaLiga}] ${listSkor.slice(0, 2).join(' | ')}`);
         }
-        // Diacak dulu biar liga yang kebagian slot gantian tiap refresh, gak pilih kasih
-        hasilItems.push(...shuffleArray(skorItems).slice(0, 3)); // maks 3 liga buat skor
+        hasilItems.push(...shuffleArray(skorItems).slice(0, 3));
     }
 
-    // ── FORMAT JADWAL ──
     if (semuaJadwal.length > 0) {
         semuaJadwal.sort((a, b) => new Date(a.tanggal) - new Date(b.tanggal));
         const jadwalPerLiga = {};
@@ -316,30 +285,10 @@ async function getBola() {
         for (const [namaLiga, listJadwal] of Object.entries(jadwalPerLiga)) {
             jadwalItems.push(`[Jadwal ${namaLiga}] ${listJadwal.slice(0, 2).join(' | ')}`);
         }
-        // Diacak dulu biar liga yang kebagian slot gantian tiap refresh, gak pilih kasih
-        hasilItems.push(...shuffleArray(jadwalItems).slice(0, 3)); // maks 3 liga buat jadwal
+        hasilItems.push(...shuffleArray(jadwalItems).slice(0, 3));
     }
 
     return hasilItems;
-}
-
-// ── Build RSS XML ─────────────────────────────────────────────────────────────
-function buildRSS(items) {
-    const now = new Date().toUTCString();
-    let itemsXml = '';
-    for (const title of items) {
-        // CDATA sudah literal — JANGAN escape entity di sini, cukup jaga "]]>"
-        itemsXml += `  <item><title><![CDATA[${safeCData(title)}]]></title></item>\n`;
-    }
-    return `<?xml version="1.0" encoding="UTF-8"?>
-<rss version="2.0">
-  <channel>
-    <title>JWS Ersa Cloud Feed</title>
-    <link>https://api-jws-ersa.vercel.app</link>
-    <description>Aggregated feed untuk ESP32 Display</description>
-    <lastBuildDate>${now}</lastBuildDate>
-${itemsXml}  </channel>
-</rss>`;
 }
 
 // ── Handler utama ─────────────────────────────────────────────────────────────
@@ -354,14 +303,9 @@ export default async function handler(req, res) {
     const wantOlahraga = q.olahraga !== '0';
     const wantLibur    = q.libur    !== '0';
 
-    const TARGET_TOTAL          = 12; // target jumlah item total di RSS
-    const BERITA_QUOTA_PER_SUMBER = 8; // kuota digenerouskan — kalau 1-2 sumber lagi basi,
-                                        // sumber yang masih fresh tetep bisa nutupin ke TARGET_TOTAL
+    const TARGET_TOTAL          = 12;
+    const BERITA_QUOTA_PER_SUMBER = 8;
 
-    // Kategori non-berita di-fetch duluan (libur/gempa/olahraga/bola sering
-    // ke-filter jadi kosong oleh aturan freshness/dirasakan/countdown), baru
-    // setelah itu berita di-fetch dengan kuota gede per sumber — final list
-    // dipotong ke TARGET_TOTAL di akhir.
     const [liburItems, gempaItems, olahragaItems, bolaItems] = await Promise.all([
         wantLibur    ? getLibur()                              : [],
         wantGempa    ? getGempa()                              : [],
@@ -371,27 +315,18 @@ export default async function handler(req, res) {
 
     const beritaItemsMentah = wantBerita ? await getBerita(BERITA_QUOTA_PER_SUMBER) : [];
 
-    // FIX: reservasi dulu slot buat kategori non-berita (libur/gempa/olahraga/bola)
-    // sebelum berita dijatah sisanya. Sebelumnya beritaItems (bisa sampai 32 item
-    // karena BERITA_QUOTA_PER_SUMBER x 4 sumber) ditaruh SEBELUM olahraga & bola
-    // lalu semuanya di-slice(0, TARGET_TOTAL) — akibatnya begitu berita saja sudah
-    // >= TARGET_TOTAL, olahraga & bola (yang mestinya jadi "ekor" tetap) selalu
-    // kepotong duluan meski datanya berhasil di-fetch.
     const nonBeritaCount = liburItems.length + gempaItems.length + olahragaItems.length + bolaItems.length;
     const sisaUntukBerita = Math.max(TARGET_TOTAL - nonBeritaCount, 0);
     const beritaItems = beritaItemsMentah.slice(0, sisaUntukBerita);
 
-    // Berita & Info BMKG/Libur ditaruh di depan, BOLA disuntikkan di paling ekor
     let allItems = [
-        ...liburItems,    // Countdown libur
-        ...gempaItems,    // Info Gempa BMKG
-        ...beritaItems,   // Berita umum (sudah dijatah sesuai sisa slot)
-        ...olahragaItems, // Berita olahraga
-        ...bolaItems,     // BONUS EKOR: Skor (00-12) ATAU Jadwal (12-00)
+        ...liburItems,
+        ...gempaItems,
+        ...beritaItems,
+        ...olahragaItems,
+        ...bolaItems,
     ];
 
-    // Jaga-jaga kalau nonBeritaCount sendiri sudah > TARGET_TOTAL (jarang terjadi,
-    // tapi tetap dipotong biar gak melebihi target di ESP32).
     if (allItems.length > TARGET_TOTAL) {
         allItems = allItems.slice(0, TARGET_TOTAL);
     }
@@ -400,8 +335,12 @@ export default async function handler(req, res) {
         allItems.push('Tidak ada data tersedia saat ini');
     }
 
-    const xml = buildRSS(allItems);
-    res.setHeader('Content-Type', 'application/xml; charset=utf-8');
-    res.status(200).send(xml);
-}
-    
+    // Perubahan Utama: Output dikirim sebagai JSON murni
+    res.setHeader('Content-Type', 'application/json; charset=utf-8');
+    res.status(200).json({
+        status: "success",
+        total: allItems.length,
+        items: allItems
+    });
+            }
+            
