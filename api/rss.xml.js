@@ -45,12 +45,22 @@ const LIGA_LIST = [
 // ── Offset WIB (UTC+7) dalam milidetik ───────────────────────────────────────
 const WIB_OFFSET_MS = 7 * 60 * 60 * 1000;
 
+// ── Header ala browser (banyak situs berita menolak request tanpa User-Agent) ─
+const FETCH_HEADERS = {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+    'Accept': 'application/rss+xml, application/xml, text/xml, application/json, text/plain, */*',
+    'Accept-Language': 'id-ID,id;q=0.9,en;q=0.8'
+};
+
 // ── Fetch dengan timeout yang terisolasi ──────────────────────────────────────
 async function fetchWithTimeout(url, ms = 7000) {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), ms);
     try {
-        const res = await fetch(url, { signal: controller.signal });
+        const res = await fetch(url, {
+            signal: controller.signal,
+            headers: FETCH_HEADERS
+        });
         return res;
     } finally {
         clearTimeout(timer); // Selalu dibersihkan secara aman
@@ -392,12 +402,50 @@ function interleaveBeritaLantas(beritaArr, lantasArr) {
     return hasil;
 }
 
+// ── Mode debug: cek status tiap sumber (GET /api/rss_xml?debug=1) ────────────
+async function debugSource(name, url) {
+    const t0 = Date.now();
+    try {
+        const res = await fetchWithTimeout(url);
+        const text = await res.text();
+        const itemCount = (text.match(/<item>/g) || []).length;
+        const umurJam = [...text.matchAll(/<pubDate>([\s\S]*?)<\/pubDate>/g)]
+            .map(m => (Date.now() - new Date(m[1].trim()).getTime()) / 3600000)
+            .filter(n => !isNaN(n));
+        return {
+            name,
+            status: res.status,
+            contentType: res.headers.get('content-type'),
+            bytes: text.length,
+            items: itemCount,
+            itemsDalam24Jam: umurJam.filter(n => n <= 24).length,
+            ms: Date.now() - t0,
+            preview: text.slice(0, 160).replace(/\s+/g, ' ')
+        };
+    } catch (e) {
+        return { name, error: `${e.name}: ${e.message}`, ms: Date.now() - t0 };
+    }
+}
+
 // ── Handler utama ─────────────────────────────────────────────────────────────
 export default async function handler(req, res) {
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Cache-Control', 's-maxage=300, stale-while-revalidate');
 
     const q = req.query || {};
+
+    // Mode debug: tampilkan status tiap sumber, tanpa cache
+    if (q.debug === '1') {
+        const hasil = await Promise.all([
+            debugSource('lantas', GOOGLE_LANTAS_URL),
+            debugSource('olahraga', RSS_OLAHRAGA.url),
+            ...RSS_SOURCES.map(src => debugSource(src.name, src.url)),
+        ]);
+        res.setHeader('Cache-Control', 'no-store');
+        res.setHeader('Content-Type', 'application/json; charset=utf-8');
+        res.status(200).send(JSON.stringify(hasil, null, 2));
+        return;
+    }
     const wantBerita   = q.berita   !== '0';
     const wantGempa    = q.gempa    !== '0';
     const wantBola     = q.bola     !== '0';
@@ -446,10 +494,4 @@ export default async function handler(req, res) {
     }
 
     res.setHeader('Content-Type', 'application/json; charset=utf-8');
-    res.status(200).send(JSON.stringify({
-        status: "success",
-        total: allItems.length,
-        items: allItems
-    }, null, 2));
-                    }
-        
+    res.status(200).send(JSON.stringify(
