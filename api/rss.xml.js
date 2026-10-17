@@ -23,8 +23,8 @@ const LIGA_LIST = [
     { nama: 'La Liga',   id: 4335 },  // Spanish La Liga
     { nama: 'Serie A',   id: 4332 },  // Italian Serie A
     { nama: 'Bundesliga',id: 4331 },  // German Bundesliga
-    { nama: 'UCL',       id: 4480 },  // UEFA Champions League
-    { nama: 'UEL',       id: 4359 },  // UEFA Europa League
+    { nama: 'UCL',       id: 4188 },  // UEFA Champions League
+    { nama: 'UEL',       id: 4481 },  // UEFA Europa League
     { nama: 'Liga 1',    id: 4790 },  // Liga 1 Indonesia
 ];
 
