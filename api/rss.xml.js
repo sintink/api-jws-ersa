@@ -233,7 +233,7 @@ async function getBola() {
     await Promise.all(LIGA_LIST.map(async (liga) => {
         // 1. Ambil Skor Terakhir (Key 1, Timeout 8000)
         try {
-            const urlPast = `https://www.thesportsdb.com/api/v1/json/1/eventspastleague.php?id=${liga.id}`;
+            const urlPast = `https://www.thesportsdb.com/api/v1/json/123/eventspastleague.php?id=${liga.id}`;
             const resPast = await fetchWithTimeout(urlPast, 8000);
             const jsonPast = await resPast.json();
             const eventsPast = jsonPast?.events || [];
