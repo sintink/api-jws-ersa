@@ -98,7 +98,7 @@ async function getBerita(quotaPerSource = 3) {
     return merged;
 }
 
-// ── Ambil berita Lantas dari Google News ─────────────────────────────────────
+// ── Ambil berita Lantas dari Google News (Anti Duplikat Topik) ───────────────
 async function getLantas(quota = 3) {
     try {
         const res = await fetchWithTimeout(GOOGLE_LANTAS_URL);
@@ -108,7 +108,7 @@ async function getLantas(quota = 3) {
         const titleRegex = /<title><!\[CDATA\[([\s\S]*?)\]\]><\/title>|<title>([\s\S]*?)<\/title>/;
 
         const items = [];
-        const seenTitles = new Set();
+        const seenKeywords = []; // Array buat simpan kata kunci berita yang udah masuk
         let match;
 
         while ((match = itemRegex.exec(xml)) !== null && items.length < quota) {
@@ -118,10 +118,22 @@ async function getLantas(quota = 3) {
             if (titleMatch) {
                 let title = (titleMatch[1] || titleMatch[2] || '').trim();
                 title = title.replace(/\s-\s[^-]+$/, '').trim(); // Hapus nama media
-                const titleKey = title.toLowerCase();
+                
+                // Ambil kata-kata penting (minimal 4 huruf)
+                const words = title.toLowerCase().match(/\b[a-z]{4,}\b/g) || [];
+                
+                // Cek apakah ada 2 kata penting yang udah pernah muncul di berita sebelumnya
+                let isDuplicate = false;
+                for (const seen of seenKeywords) {
+                    const commonWords = words.filter(w => seen.includes(w));
+                    if (commonWords.length >= 2) { 
+                        isDuplicate = true;
+                        break;
+                    }
+                }
 
-                if (title.length > 10 && !seenTitles.has(titleKey)) {
-                    seenTitles.add(titleKey);
+                if (title.length > 10 && !isDuplicate) {
+                    seenKeywords.push(words);
                     items.push(`[Lantas] ${title}`);
                 }
             }
@@ -209,7 +221,7 @@ function shuffleArray(arr) {
     return a;
 }
 
-// ── Ambil Data Bola (Menggunakan Free Key 1) ──────────────────────────────────
+// ── Ambil Data Bola (Menggunakan Free Key 1 & Timeout 8 Detik) ───────────────
 async function getBola() {
     const wibNow      = new Date(Date.now() + WIB_OFFSET_MS);
     const hariIniWIB  = new Date(Date.UTC(wibNow.getUTCFullYear(), wibNow.getUTCMonth(), wibNow.getUTCDate()));
@@ -219,10 +231,10 @@ async function getBola() {
     let semuaJadwal = [];
 
     await Promise.all(LIGA_LIST.map(async (liga) => {
-        // 1. Ambil Skor Terakhir (Key 1)
+        // 1. Ambil Skor Terakhir (Key 1, Timeout 8000)
         try {
             const urlPast = `https://www.thesportsdb.com/api/v1/json/1/eventspastleague.php?id=${liga.id}`;
-            const resPast = await fetchWithTimeout(urlPast, 5000);
+            const resPast = await fetchWithTimeout(urlPast, 8000);
             const jsonPast = await resPast.json();
             const eventsPast = jsonPast?.events || [];
 
@@ -253,10 +265,10 @@ async function getBola() {
             console.error(`getBola skor ${liga.nama} error:`, e.message);
         }
 
-        // 2. Ambil Jadwal Mendatang (Key 1)
+        // 2. Ambil Jadwal Mendatang (Key 1, Timeout 8000)
         try {
             const urlNext = `https://www.thesportsdb.com/api/v1/json/1/eventsnextleague.php?id=${liga.id}`;
-            const resNext = await fetchWithTimeout(urlNext, 5000);
+            const resNext = await fetchWithTimeout(urlNext, 8000);
             const jsonNext = await resNext.json();
             const eventsNext = jsonNext?.events || [];
 
@@ -354,19 +366,25 @@ export default async function handler(req, res) {
     const TARGET_TOTAL            = 12;
     const BERITA_QUOTA_PER_SUMBER = 4;
 
+    // Perbaikan 1: Umur berita olahraga dilonggarkan jadi 24 jam
     const [liburItems, gempaItems, olahragaItems, bolaItems, lantasItems] = await Promise.all([
-        wantLibur    ? getLibur()                              : [],
-        wantGempa    ? getGempa()                              : [],
-        wantOlahraga ? fetchOneRSS(RSS_OLAHRAGA, 3, 'Olahraga') : [],
-        wantBola     ? getBola()                                : [],
-        wantLantas   ? getLantas(4)                             : [],
+        wantLibur    ? getLibur()                                  : [],
+        wantGempa    ? getGempa()                                  : [],
+        wantOlahraga ? fetchOneRSS(RSS_OLAHRAGA, 3, 'Olahraga', 24): [],
+        wantBola     ? getBola()                                   : [],
+        wantLantas   ? getLantas(4)                                : [],
     ]);
 
     const beritaItemsMentah = wantBerita ? await getBerita(BERITA_QUOTA_PER_SUMBER) : [];
     const poolBerita = interleaveBeritaLantas(beritaItemsMentah, lantasItems);
 
+    // Perbaikan 2: Batasi maksimal berita jadi 5 slot aja
     const nonBeritaCount = liburItems.length + gempaItems.length + olahragaItems.length + bolaItems.length;
-    const sisaUntukBerita = Math.max(TARGET_TOTAL - nonBeritaCount, 0);
+    const MAX_BERITA = 5; 
+    const sisaUntukBerita = Math.min(
+        Math.max(TARGET_TOTAL - nonBeritaCount, 0),
+        MAX_BERITA // Berita umum maksimal 5 item
+    );
     
     const beritaFinal = poolBerita.slice(0, sisaUntukBerita);
 
@@ -393,4 +411,3 @@ export default async function handler(req, res) {
         items: allItems
     }, null, 2));
 }
-    
