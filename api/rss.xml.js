@@ -1,6 +1,5 @@
-// api/rss_xml.js (Sekarang output JSON murni)
-// Vercel Serverless Function — RSS + JSON Aggregator untuk ESP32 Display
-// Endpoint: GET /rss.xml?berita=1&gempa=1&bola=1&olahraga=1&libur=1&lantas=1 (atau /rss.json)
+// api/rss_xml.js (Output JSON murni - Vercel Serverless Function)
+// Endpoint: GET /api/rss_xml?berita=1&gempa=1&bola=1&olahraga=1&libur=1&lantas=1
 
 // ── Sumber RSS Berita ─────────────────────────────────────────────────────────
 const RSS_SOURCES = [
@@ -9,7 +8,7 @@ const RSS_SOURCES = [
     { name: 'Tirto',  url: 'https://tirto.id/sitemap/r/google-discover' },
 ];
 
-// ── Sumber JSON ───────────────────────────────────────────────────────────────
+// ── Sumber JSON & RSS Tambahan ────────────────────────────────────────────────
 const BMKG_GEMPA   = 'https://data.bmkg.go.id/DataMKG/TEWS/autogempa.json';
 const RSS_OLAHRAGA = { name: 'Olahraga', url: 'https://www.cnnindonesia.com/olahraga/rss' };
 const LIBUR_URL    = 'https://raw.githubusercontent.com/guangrei/APIHariLibur_V2/main/holidays.json';
@@ -17,13 +16,13 @@ const LIBUR_URL    = 'https://raw.githubusercontent.com/guangrei/APIHariLibur_V2
 // ── Sumber Google News (Lalu Lintas Jateng) ──────────────────────────────────
 const GOOGLE_LANTAS_URL = 'https://news.google.com/rss/search?q=lalu+lintas+Jawa+Tengah+OR+Polda+Jateng+OR+macet+Semarang&hl=id&gl=ID&ceid=ID:id';
 
-// TheSportsDB — 7 Liga Pilihan
+// TheSportsDB — 7 Liga Pilihan (ID Resmi)
 const LIGA_LIST = [
     { nama: 'EPL',       id: 4328 },  // English Premier League
     { nama: 'La Liga',   id: 4335 },  // Spanish La Liga
     { nama: 'Serie A',   id: 4332 },  // Italian Serie A
     { nama: 'Bundesliga',id: 4331 },  // German Bundesliga
-    { nama: 'UCL',       id: 4188 },  // UEFA Champions League
+    { nama: 'UCL',       id: 4188 },  // UEFA Champions League (Pria)
     { nama: 'UEL',       id: 4481 },  // UEFA Europa League
     { nama: 'Liga 1',    id: 4790 },  // Liga 1 Indonesia
 ];
@@ -31,49 +30,44 @@ const LIGA_LIST = [
 // ── Offset WIB (UTC+7) dalam milidetik ───────────────────────────────────────
 const WIB_OFFSET_MS = 7 * 60 * 60 * 1000;
 
-// ── Fetch dengan timeout ──────────────────────────────────────────────────────
-async function fetchWithTimeout(url, ms = 8000) {
+// ── Fetch dengan timeout yang terisolasi ──────────────────────────────────────
+async function fetchWithTimeout(url, ms = 7000) {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), ms);
     try {
         const res = await fetch(url, { signal: controller.signal });
-        clearTimeout(timer);
         return res;
-    } catch (e) {
-        clearTimeout(timer);
-        throw e;
+    } finally {
+        clearTimeout(timer); // Selalu dibersihkan secara aman
     }
 }
 
 // ── Ambil berita dari satu RSS source ────────────────────────────────────────
-async function fetchOneRSS(source, quota = 3, label = 'Berita', maxAgeHours = 3) {
+async function fetchOneRSS(source, quota = 3, label = 'Berita', maxAgeHours = 6) {
     try {
         const res = await fetchWithTimeout(source.url);
         const xml = await res.text();
 
         const itemRegex = /<item>[\s\S]*?<\/item>/g;
         const pubDateRegex = /<pubDate>([\s\S]*?)<\/pubDate>/;
+        const titleRegex = /<title><!\[CDATA\[([\s\S]*?)\]\]><\/title>|<title>([\s\S]*?)<\/title>/;
 
-        const firstItemMatch = itemRegex.exec(xml);
-        if (firstItemMatch) {
-            const pubDateMatch = pubDateRegex.exec(firstItemMatch[0]);
+        const items = [];
+        let match;
+
+        while ((match = itemRegex.exec(xml)) !== null && items.length < quota) {
+            const itemXml = match[0];
+            
+            // Filter umur berita jika pubDate tersedia
+            const pubDateMatch = pubDateRegex.exec(itemXml);
             if (pubDateMatch) {
                 const pubDate = new Date(pubDateMatch[1].trim());
                 if (!isNaN(pubDate.getTime())) {
                     const ageHours = (Date.now() - pubDate.getTime()) / (1000 * 60 * 60);
-                    if (ageHours > maxAgeHours) {
-                        return [];
-                    }
+                    if (ageHours > maxAgeHours) continue; // Skip item yang terlalu lama
                 }
             }
-        }
-        itemRegex.lastIndex = 0;
 
-        const items = [];
-        const titleRegex = /<title><!\[CDATA\[([\s\S]*?)\]\]><\/title>|<title>([\s\S]*?)<\/title>/;
-        let match;
-        while ((match = itemRegex.exec(xml)) !== null && items.length < quota) {
-            const itemXml = match[0];
             const titleMatch = titleRegex.exec(itemXml);
             if (titleMatch) {
                 const title = (titleMatch[1] || titleMatch[2] || '').trim();
@@ -95,7 +89,7 @@ async function getBerita(quotaPerSource = 3) {
         RSS_SOURCES.map(src => fetchOneRSS(src, quotaPerSource, 'Berita'))
     );
     const merged = [];
-    const maxLen = Math.max(...results.map(r => r.length));
+    const maxLen = Math.max(...results.map(r => r.length), 0);
     for (let i = 0; i < maxLen; i++) {
         for (const arr of results) {
             if (arr[i]) merged.push(arr[i]);
@@ -104,7 +98,7 @@ async function getBerita(quotaPerSource = 3) {
     return merged;
 }
 
-// ── Ambil berita Lantas dari Google News (bersih dari duplikat & nama media) ──
+// ── Ambil berita Lantas dari Google News ─────────────────────────────────────
 async function getLantas(quota = 3) {
     try {
         const res = await fetchWithTimeout(GOOGLE_LANTAS_URL);
@@ -114,7 +108,7 @@ async function getLantas(quota = 3) {
         const titleRegex = /<title><!\[CDATA\[([\s\S]*?)\]\]><\/title>|<title>([\s\S]*?)<\/title>/;
 
         const items = [];
-        const seenTitles = new Set(); // Buat deteksi duplikat
+        const seenTitles = new Set();
         let match;
 
         while ((match = itemRegex.exec(xml)) !== null && items.length < quota) {
@@ -123,15 +117,11 @@ async function getLantas(quota = 3) {
 
             if (titleMatch) {
                 let title = (titleMatch[1] || titleMatch[2] || '').trim();
-
-                // 1. Bersihin embel-embel "- Nama Media" di akhir judul Google News
-                title = title.replace(/\s-\s[^-]+$/, '').trim();
-
-                // 2. Cek duplikat (pakai huruf kecil biar case-insensitive)
+                title = title.replace(/\s-\s[^-]+$/, '').trim(); // Hapus nama media
                 const titleKey = title.toLowerCase();
 
                 if (title.length > 10 && !seenTitles.has(titleKey)) {
-                    seenTitles.add(titleKey); // Tandai udah pernah muncul
+                    seenTitles.add(titleKey);
                     items.push(`[Lantas] ${title}`);
                 }
             }
@@ -219,7 +209,7 @@ function shuffleArray(arr) {
     return a;
 }
 
-// ── Ambil Data Bola ───────────────────────────────────────────────────────────
+// ── Ambil Data Bola (Menggunakan Free Key 1) ──────────────────────────────────
 async function getBola() {
     const wibNow      = new Date(Date.now() + WIB_OFFSET_MS);
     const hariIniWIB  = new Date(Date.UTC(wibNow.getUTCFullYear(), wibNow.getUTCMonth(), wibNow.getUTCDate()));
@@ -229,9 +219,10 @@ async function getBola() {
     let semuaJadwal = [];
 
     await Promise.all(LIGA_LIST.map(async (liga) => {
+        // 1. Ambil Skor Terakhir (Key 1)
         try {
-            const urlPast = `https://www.thesportsdb.com/api/v1/json/123/eventspastleague.php?id=${liga.id}`;
-            const resPast = await fetchWithTimeout(urlPast, 6000);
+            const urlPast = `https://www.thesportsdb.com/api/v1/json/1/eventspastleague.php?id=${liga.id}`;
+            const resPast = await fetchWithTimeout(urlPast, 5000);
             const jsonPast = await resPast.json();
             const eventsPast = jsonPast?.events || [];
 
@@ -262,9 +253,10 @@ async function getBola() {
             console.error(`getBola skor ${liga.nama} error:`, e.message);
         }
 
+        // 2. Ambil Jadwal Mendatang (Key 1)
         try {
-            const urlNext = `https://www.thesportsdb.com/api/v1/json/123/eventsnextleague.php?id=${liga.id}`;
-            const resNext = await fetchWithTimeout(urlNext, 6000);
+            const urlNext = `https://www.thesportsdb.com/api/v1/json/1/eventsnextleague.php?id=${liga.id}`;
+            const resNext = await fetchWithTimeout(urlNext, 5000);
             const jsonNext = await resNext.json();
             const eventsNext = jsonNext?.events || [];
 
@@ -313,7 +305,6 @@ async function getBola() {
             const target = new Date(m.tanggal);
             const hariLagi = Math.ceil((target - hariIniWIB) / (1000 * 60 * 60 * 24));
 
-            // Cuma ambil hari ini ("Nanti") dan besok, sisanya dibuang
             if (hariLagi > 1) continue;
 
             const labelHari = hariLagi <= 0 ? "Nanti" : "Besok";
@@ -337,11 +328,9 @@ function interleaveBeritaLantas(beritaArr, lantasArr) {
     let bi = 0, li = 0;
     
     while (bi < beritaArr.length || li < lantasArr.length) {
-        // Ambil 2 berita dulu
         for (let k = 0; k < 2 && bi < beritaArr.length; k++) {
             hasil.push(beritaArr[bi++]);
         }
-        // Lalu ambil 1 lantas
         if (li < lantasArr.length) {
             hasil.push(lantasArr[li++]);
         }
@@ -360,13 +349,10 @@ export default async function handler(req, res) {
     const wantBola     = q.bola     !== '0';
     const wantOlahraga = q.olahraga !== '0';
     const wantLibur    = q.libur    !== '0';
-    
-    // Lantas otomatis ikut berita, ESP32 nggak perlu toggle baru
-    // Tapi tetap bisa dimatikan manual via ?lantas=0 kalau lagi testing
     const wantLantas   = wantBerita && q.lantas !== '0';
 
     const TARGET_TOTAL            = 12;
-    const BERITA_QUOTA_PER_SUMBER = 4; // 3 sumber x 4 = 12 kandidat
+    const BERITA_QUOTA_PER_SUMBER = 4;
 
     const [liburItems, gempaItems, olahragaItems, bolaItems, lantasItems] = await Promise.all([
         wantLibur    ? getLibur()                              : [],
@@ -377,15 +363,11 @@ export default async function handler(req, res) {
     ]);
 
     const beritaItemsMentah = wantBerita ? await getBerita(BERITA_QUOTA_PER_SUMBER) : [];
-
-    // Gabungkan Berita & Lantas selang-seling (2:1)
     const poolBerita = interleaveBeritaLantas(beritaItemsMentah, lantasItems);
 
-    // Hitung sisa slot (lantas TIDAK dihitung terpisah karena udah nyampur di poolBerita)
     const nonBeritaCount = liburItems.length + gempaItems.length + olahragaItems.length + bolaItems.length;
     const sisaUntukBerita = Math.max(TARGET_TOTAL - nonBeritaCount, 0);
     
-    // Ambil pool berita sesuai sisa slot
     const beritaFinal = poolBerita.slice(0, sisaUntukBerita);
 
     let allItems = [
@@ -404,11 +386,11 @@ export default async function handler(req, res) {
         allItems.push('Tidak ada data tersedia saat ini');
     }
 
-    // Output JSON rapi (Pretty Print) biar gampang dihitung di browser
     res.setHeader('Content-Type', 'application/json; charset=utf-8');
     res.status(200).send(JSON.stringify({
         status: "success",
         total: allItems.length,
         items: allItems
     }, null, 2));
-                }
+}
+    
