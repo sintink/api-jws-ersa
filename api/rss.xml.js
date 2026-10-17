@@ -24,8 +24,12 @@ const LANTAS_STOPWORDS = new Set([
     'kota', 'jalan', 'arus', 'kendaraan', 'polisi', 'polres'
 ]);
 
+// Filter gempa: cuma tampil kalau cukup besar dan masih baru
+const GEMPA_MIN_MAG   = 4.0;
+const GEMPA_MAX_JAM   = 6;
+
 // ── TheSportsDB ───────────────────────────────────────────────────────────────
-const SPORTSDB_KEY = '1'; // Free key, dipakai untuk skor DAN jadwal (satu tempat biar konsisten)
+const SPORTSDB_KEY = '123'; // Free key, dipakai untuk skor DAN jadwal (satu tempat biar konsisten)
 
 // TheSportsDB — 7 Liga Pilihan
 const LIGA_LIST = [
@@ -183,6 +187,19 @@ async function getGempa() {
             /dirasakan/i.test(potensiField);
 
         if (!adaLaporanDirasakan) return [];
+
+        // Filter magnitudo: gempa kecil diabaikan
+        const magNum = parseFloat(g.Magnitude);
+        if (isNaN(magNum) || magNum < GEMPA_MIN_MAG) return [];
+
+        // Filter umur: pakai DateTime ISO dari BMKG (UTC). Kalau tidak ada/invalid, lewati cek umur
+        if (g.DateTime) {
+            const waktuGempa = new Date(g.DateTime);
+            if (!isNaN(waktuGempa.getTime())) {
+                const umurJam = (Date.now() - waktuGempa.getTime()) / (1000 * 60 * 60);
+                if (umurJam > GEMPA_MAX_JAM) return [];
+            }
+        }
 
         const mag     = g.Magnitude || '?';
         const dalam   = g.Kedalaman || '?';
@@ -434,4 +451,5 @@ export default async function handler(req, res) {
         total: allItems.length,
         items: allItems
     }, null, 2));
-}
+                    }
+        
